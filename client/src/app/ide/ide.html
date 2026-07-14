@@ -1,0 +1,60 @@
+<div class="ide">
+  <header class="toolbar">
+    <span class="brand">browser-ide</span>
+    <span class="file">{{ state.activeName() ?? 'no file open' }}</span>
+    <span class="spacer"></span>
+    <button class="cloud" (click)="cloudSave()" title="Save this workspace to the cloud (files only — code still runs locally)">
+      ☁ Save
+    </button>
+    <a class="cloud" routerLink="/dashboard" title="Your cloud projects">
+      {{ auth.email() ?? 'Sign in' }}
+    </a>
+    <button
+      class="run"
+      [class.stop]="runner.running()"
+      [disabled]="!runner.running() && !runner.canRun(state.active())"
+      [title]="
+        runner.running()
+          ? 'Stop the running program'
+          : runner.canRun(state.active())
+            ? 'Runs 100% locally in your browser'
+            : 'Open a runnable file (.js / .ts / .py / .c / .cpp / .java)'
+      "
+      (click)="run()"
+    >
+      {{ runner.running() ? '■ Stop' : '▶ Run' }}
+    </button>
+  </header>
+
+  <div class="main">
+    <nav class="activity-bar">
+      <button class="activity active" title="Explorer">🗂</button>
+      <button class="activity" title="Search (coming soon)" disabled>🔍</button>
+      <span class="spacer"></span>
+      <button class="activity" title="Settings (coming soon)" disabled>⚙</button>
+    </nav>
+
+    <aside class="sidebar">
+      <ide-file-tree />
+    </aside>
+
+    <section class="editor-col">
+      <div class="tab-strip"><ide-tabs /></div>
+      <div class="editor-area"><ide-editor /></div>
+      <div class="panel">
+        <div class="panel-header">
+          <span>OUTPUT</span>
+          <span class="spacer"></span>
+          <button title="Clear output" (click)="terminal.clear()">🗑</button>
+        </div>
+        <div class="panel-body"><ide-terminal /></div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="status-bar">
+    <span>◈ local workspace (OPFS)</span>
+    <span class="spacer"></span>
+    <span>runtimes: JS · TS · Python · C/C++ · Java 21 — all in-browser, zero server execution</span>
+  </footer>
+</div>

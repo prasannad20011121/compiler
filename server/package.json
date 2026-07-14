@@ -1,0 +1,23 @@
+{
+  "name": "browser-ide-server",
+  "version": "0.1.0",
+  "description": "browser-ide API — auth + project persistence only; code execution never happens server-side",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": "24.14.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "bcryptjs": "3.0.3",
+    "cors": "2.8.6",
+    "dotenv": "17.4.2",
+    "express": "5.2.1",
+    "jsonwebtoken": "9.0.3",
+    "mongoose": "9.7.4"
+  }
+}

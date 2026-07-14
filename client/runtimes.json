@@ -1,0 +1,42 @@
+{
+  "$comment": "Single source of truth for self-hosted WASM language runtimes. Entries are installed by scripts/download-runtimes.mjs into public/runtimes/<name>/<version>/ and always load same-origin — never from a third-party CDN at runtime. source 'node_modules' copies from the exact-pinned npm package (integrity guaranteed by package-lock.json); source 'url' downloads and verifies a SHA-256 checksum.",
+  "runtimes": {
+    "pyodide": {
+      "version": "314.0.2",
+      "source": "node_modules",
+      "package": "pyodide",
+      "files": [
+        "pyodide.mjs",
+        "pyodide.asm.mjs",
+        "pyodide.asm.wasm",
+        "python_stdlib.zip",
+        "pyodide-lock.json"
+      ]
+    },
+    "teavm-javac": {
+      "$comment": "javac 21 + TeaVM compiled to WASM-GC (konsoletyper/teavm-javac, Apache-2.0; OpenJDK parts GPLv2+Classpath-exception). Single-file Java 21 console programs; System.in not supported by the TeaVM console.",
+      "version": "3",
+      "source": "url-files",
+      "baseUrl": "https://teavm.org/playground/3/",
+      "files": [
+        { "name": "compiler.wasm", "sha256": "7f3828e4b7bddf5504dadebfc4016e40f4441e15ee0519071781813ba2ed3a4c" },
+        { "name": "compiler.wasm-runtime.js", "sha256": "9ff6a6771f698be00ab9d5c7b46d904350a8d4115dc0b409553f31ed66688a55" },
+        { "name": "compile-classlib-teavm.bin", "sha256": "e80ae10423a39290c5f20b6bb6da34d21c3ad0a75cd8dbdda4998d2813045e15" },
+        { "name": "runtime-classlib-teavm.bin", "sha256": "ea670e71967eda93828cb894c1741a8ed2e94b3422eb99cb9eccec0de67daaa8" }
+      ]
+    },
+    "wasm-clang": {
+      "$comment": "clang+lld compiled to WASM (binji/wasm-clang, Apache-2.0 + LLVM license). clang 8.0.1, C11/C++17.",
+      "version": "8.0.1",
+      "source": "url-files",
+      "baseUrl": "https://binji.github.io/wasm-clang/",
+      "files": [
+        { "name": "clang", "sha256": "2a466f0e990329d3230b869d04fc20803eae96a7feb3a3f6c93e25a77b8aed1d" },
+        { "name": "lld", "sha256": "36419ed202011765222098d7701218378b67f634d50f0a4625059ae2c9860f48" },
+        { "name": "memfs", "sha256": "2c72ee42bd9430029dda8c6bafc9f37143f6fe88d5f1ea950a70259ab748bcfe" },
+        { "name": "shared.js", "sha256": "4de0be862bda1a7571c1f0632abe3c62c47a56e734cc6b703155805a4b160b1c" },
+        { "name": "sysroot.tar", "sha256": "2435a7b549af30c2be7ec249c405bc2e911ab0c6003012f0909ec3c131bff867" }
+      ]
+    }
+  }
+}

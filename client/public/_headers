@@ -1,0 +1,14 @@
+# Cloudflare Pages headers.
+# COOP/COEP make the site cross-origin isolated, enabling SharedArrayBuffer —
+# required by the interactive stdin bridge (Python and C/C++ input()).
+# Safe here because every asset, including all WASM runtimes, is same-origin.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# Runtimes are immutable at their versioned paths — cache hard.
+/runtimes/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/monaco/*
+  Cache-Control: public, max-age=31536000, immutable
