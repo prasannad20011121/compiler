@@ -44,4 +44,4 @@ __screenshots__/
 Thumbs.db
 
 # Installed WASM runtimes (regenerate with npm run runtimes)
-/public/runtimes/
+#/public/runtimes/
