@@ -112,7 +112,7 @@ export class Editor implements OnDestroy {
 
     this.state.saveRequest$
       .pipe(takeUntilDestroyed(this.destroyRef))
-      .subscribe(() => void this.saveActive());
+      .subscribe(() => void this.saveAll());
   }
 
   private async initMonaco(): Promise<void> {
@@ -129,7 +129,7 @@ export class Editor implements OnDestroy {
       model: null,
     });
     this.editor.addCommand(this.monaco.KeyMod.CtrlCmd | this.monaco.KeyCode.KeyS, () =>
-      void this.saveActive(),
+      void this.saveAll(),
     );
     this.ready.set(true);
   }
@@ -168,6 +168,24 @@ export class Editor implements OnDestroy {
     if (!model) return;
     await this.workspace.writeFile(path, model.getValue());
     this.state.markClean(path);
+  }
+
+  /**
+   * Persist every dirty tab, not just the active one. Ctrl+S and Run both use
+   * this — saveActive() alone let you edit file A, switch to file B without
+   * saving, and Run would silently execute A's stale on-disk content with no
+   * warning beyond an easy-to-miss dirty dot in the tab bar.
+   */
+  async saveAll(): Promise<void> {
+    const dirtyPaths = [...this.state.dirty()];
+    await Promise.all(
+      dirtyPaths.map(async (path) => {
+        const model = this.models.get(path);
+        if (!model) return;
+        await this.workspace.writeFile(path, model.getValue());
+        this.state.markClean(path);
+      }),
+    );
   }
 
   /** Drop cached models for a removed path (file or whole folder). */

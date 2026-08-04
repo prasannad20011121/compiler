@@ -49,6 +49,21 @@ for (const [name, spec] of entries) {
       await copyFile(path.join(pkgRoot, file), path.join(dest, file));
       console.log(`  copied ${file}`);
     }
+  } else if (spec.source === 'local') {
+    // Files were placed here by a local build step (e.g. csharp-wasm-runtime/build.ps1).
+    // Just verify the directory is non-empty and write the stamp.
+    const localPath = path.join(clientRoot, spec.localPath ?? dest);
+    if (!existsSync(localPath)) {
+      throw new Error(
+        `${name}: localPath '${localPath}' does not exist.\n` +
+        `Run the build script first:\n  cd csharp-wasm-runtime && .\\build.ps1`,
+      );
+    }
+    const files = await (await import('node:fs/promises')).readdir(localPath);
+    if (files.length === 0) {
+      throw new Error(`${name}: localPath '${localPath}' is empty. Run the build script first.`);
+    }
+    console.log(`✓ ${name}@${spec.version} present at ${localPath} (${files.length} files)`);
   } else if (spec.source === 'url-files') {
     for (const file of spec.files) {
       const target = path.join(dest, file.name);

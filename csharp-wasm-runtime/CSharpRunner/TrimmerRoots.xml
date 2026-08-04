@@ -1,0 +1,21 @@
+<linker>
+  <!--
+    Tell the IL linker (trimmer) to keep all members in CSharpRunnerInterop
+    and everything Roslyn needs for in-browser compilation.
+  -->
+
+  <!-- Keep our interop class in full -->
+  <assembly fullname="CSharpRunner">
+    <type fullname="CSharpRunnerInterop" preserve="all" />
+  </assembly>
+
+  <!-- Keep Roslyn compilation pipeline -->
+  <assembly fullname="Microsoft.CodeAnalysis" preserve="all" />
+  <assembly fullname="Microsoft.CodeAnalysis.CSharp" preserve="all" />
+
+  <!-- Keep reflection-heavy BCL types used at runtime by compiled user code -->
+  <assembly fullname="System.Private.CoreLib">
+    <type fullname="System.Reflection.Assembly" preserve="all" />
+    <type fullname="System.AppDomain" preserve="all" />
+  </assembly>
+</linker>

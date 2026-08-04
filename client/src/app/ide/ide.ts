@@ -59,7 +59,7 @@ export class Ide implements OnInit {
     const name = prompt('Save workspace to cloud as:', 'my-project');
     if (!name) return;
     try {
-      await this.editor().saveActive();
+      await this.editor().saveAll();
       const saved = await this.cloud.save(name, await this.workspace.snapshot());
       this.terminal.system(`☁ saved “${saved.name}” (${new Date(saved.updatedAt).toLocaleTimeString()})`);
     } catch (e) {
@@ -74,7 +74,7 @@ export class Ide implements OnInit {
     }
     const path = this.state.active();
     if (!path || !this.runner.canRun(path)) return;
-    await this.editor().saveActive(); // run what you see
+    await this.editor().saveAll(); // run what you see — every open file, not just the active tab
     await this.runner.run(path);
   }
 }

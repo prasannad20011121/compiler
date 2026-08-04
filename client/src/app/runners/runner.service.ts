@@ -5,7 +5,7 @@ import { STDIN_SAB_BYTES, deliverStdinLine } from '../../workers/stdin-bridge';
 import { TerminalService } from '../core/terminal.service';
 import { WorkspaceService } from '../fs/workspace.service';
 
-type Language = 'js' | 'python' | 'cpp' | 'java';
+type Language = 'js' | 'python' | 'cpp' | 'java' | 'csharp';
 
 const LANGUAGE_BY_EXT: Record<string, Language> = {
   js: 'js',
@@ -18,6 +18,7 @@ const LANGUAGE_BY_EXT: Record<string, Language> = {
   cpp: 'cpp',
   cxx: 'cpp',
   java: 'java',
+  cs: 'csharp',
 };
 
 const LANGUAGE_LABEL: Record<Language, string> = {
@@ -25,6 +26,7 @@ const LANGUAGE_LABEL: Record<Language, string> = {
   python: 'Python 3.14 (Pyodide)',
   cpp: 'C/C++ (clang → WASM)',
   java: 'Java 21 (javac + TeaVM)',
+  csharp: 'C# (.NET 9 WASM)',
 };
 
 /** JS gets a hard timeout (infinite loops); Python may legitimately block on input(). */
@@ -45,7 +47,8 @@ export class RunnerService {
   private activeWorker: Worker | null = null;
   private pythonWorker: Worker | null = null; // kept warm between runs
   private cppWorker: Worker | null = null; // kept warm — holds the compiled toolchain
-  private javaWorker: Worker | null = null; // kept warm — holds the loaded javac
+  private javaWorker: Worker | null = null;   // kept warm — holds the loaded javac
+  private csharpWorker: Worker | null = null; // kept warm — holds the loaded .NET runtime
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private stdinSubscription: Subscription | null = null;
   private readonly stdinSab = new SharedArrayBuffer(STDIN_SAB_BYTES);
@@ -134,6 +137,15 @@ export class RunnerService {
         files,
         indexURL: `${location.origin}/runtimes/teavm-javac/${version}/`,
       });
+    } else if (language === 'csharp') {
+      const version = runtimesManifest.runtimes['dotnet-wasm'].version;
+      worker.postMessage({
+        type: 'run',
+        entry,
+        files,
+        stdinSab: this.stdinSab,
+        indexURL: `${location.origin}/runtimes/dotnet-wasm/${version}/`,
+      });
     } else {
       worker.postMessage({ type: 'run', entry, files });
     }
@@ -160,6 +172,10 @@ export class RunnerService {
     if (language === 'java') {
       this.javaWorker ??= new Worker('/java-worker.js', { type: 'module' });
       return this.javaWorker;
+    }
+    if (language === 'csharp') {
+      this.csharpWorker ??= new Worker('/csharp-worker.js', { type: 'module' });
+      return this.csharpWorker;
     }
     return new Worker(new URL('../../workers/code-runner.worker', import.meta.url), {
       type: 'module',
@@ -208,6 +224,7 @@ export class RunnerService {
     if (this.activeWorker === this.pythonWorker) this.pythonWorker = null;
     if (this.activeWorker === this.cppWorker) this.cppWorker = null;
     if (this.activeWorker === this.javaWorker) this.javaWorker = null;
+    if (this.activeWorker === this.csharpWorker) this.csharpWorker = null;
     this.activeWorker = null;
     this.running.set(false);
   }

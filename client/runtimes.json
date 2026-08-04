@@ -25,6 +25,12 @@
         { "name": "runtime-classlib-teavm.bin", "sha256": "ea670e71967eda93828cb894c1741a8ed2e94b3422eb99cb9eccec0de67daaa8" }
       ]
     },
+    "dotnet-wasm": {
+      "$comment": "C# (.NET 9 WASM + Roslyn in-browser compiler). Built locally via csharp-wasm-runtime/build.ps1 — requires .NET 9 SDK + wasm-tools workload. Output is committed to public/runtimes/dotnet-wasm/9.0/. Copy that folder to share with another machine.",
+      "version": "9.0",
+      "source": "local",
+      "localPath": "public/runtimes/dotnet-wasm/9.0"
+    },
     "wasm-clang": {
       "$comment": "clang+lld compiled to WASM (binji/wasm-clang, Apache-2.0 + LLVM license). clang 8.0.1, C11/C++17.",
       "version": "8.0.1",

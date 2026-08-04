@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target the browser-wasm runtime so `dotnet publish` produces an AppBundle -->
+    <TargetFramework>net9.0</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- browser-wasm is always self-contained; the JS entry point for dotnet bootstrap -->
+    <WasmMainJSPath>main.mjs</WasmMainJSPath>
+
+    <!-- Do NOT trim: Roslyn uses heavy reflection (Assembly.Load, Emit, etc.)
+         Trimming would silently break the in-browser compiler. -->
+    <PublishTrimmed>false</PublishTrimmed>
+
+    <!-- Disable invariant mode so Roslyn string/culture APIs work correctly -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+
+    <!-- Suppress CA1416: JSExportAttribute is intentionally browser-only -->
+    <NoWarn>CA1416</NoWarn>
+
+    <!-- Ship plain managed .dll bytes instead of WebCIL-wrapped .wasm files.
+         WebCIL (the SDK default) re-wraps each assembly so raw PE headers never
+         appear in a browser response; dotnet.js unwraps it transparently when
+         loading assemblies into the runtime, but Roslyn's MetadataReference
+         .CreateFromImage() expects a real PE image and throws CS0009 "doesn't
+         contain managed metadata" on a WebCIL blob. Since GatherReferencesAsync
+         (Program.cs) re-fetches these same files to build compiler references,
+         they need to be plain PE bytes. -->
+    <WasmEnableWebcil>false</WasmEnableWebcil>
+  </PropertyGroup>
+
+  <!-- Roslyn: the in-browser C# compiler -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" />
+  </ItemGroup>
+
+</Project>
