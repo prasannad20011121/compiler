@@ -5,7 +5,7 @@
  * Roslyn C# compiler. Compiles and executes user .cs files entirely in the
  * browser — no server, no CDN at runtime, all assets same-origin.
  *
- * Protocol (identical to java-worker.js / py-runner.worker.ts):
+ * Protocol (identical to py-runner.worker.ts):
  *   ← { type: 'run', entry: string, files: {path,content}[], indexURL: string, stdinSab?: SharedArrayBuffer }
  *   → { type: 'stdout' | 'stderr' | 'system', text: string }
  *   → { type: 'stdin-request' }

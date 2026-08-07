@@ -8,7 +8,6 @@ A browser-based VS Code-style IDE where **all code execution happens locally in 
 | TypeScript | TS 5.9 compiler in worker → run as JS | TS 5.9.3 |
 | Python | Pyodide (CPython in WASM), self-hosted core | 3.14.2 |
 | C / C++ | clang 8 + lld in WASM (binji/wasm-clang) → WASI-ish shim | C11 / C++17 |
-| Java | teavm-javac (javac 21 in WASM → TeaVM) | Java 21 |
 | C# | .NET 9 WASM + Roslyn in-browser compiler | .NET 9.0 |
 
 ## Structure
