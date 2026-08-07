@@ -113,6 +113,7 @@ export class FileNode {
       cpp: '🌊',
       cc: '🌊',
       hpp: '🌊',
+      java: '☕',
       json: '⚙️',
       md: '📘',
       html: '🌐',

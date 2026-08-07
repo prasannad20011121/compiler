@@ -13,6 +13,12 @@
         "pyodide-lock.json"
       ]
     },
+    "teavm-javac": {
+      "$comment": "Java 25 in-browser compiler: real javac (built from OpenJDK source, GPLv2+Classpath-exception) run through TeaVM (Apache-2.0) to WASM-GC. Built locally via java-wasm-runtime/build.sh — requires JDK 25 (to run the Gradle build) and network access to Maven Central + a git checkout of the pinned openjdk/jdk25u commit. Output is committed to public/runtimes/teavm-javac/25/. Copy that folder to share with another machine.",
+      "version": "25",
+      "source": "local",
+      "localPath": "public/runtimes/teavm-javac/25"
+    },
     "dotnet-wasm": {
       "$comment": "C# (.NET 9 WASM + Roslyn in-browser compiler). Built locally via csharp-wasm-runtime/build.ps1 — requires .NET 9 SDK + wasm-tools workload. Output is committed to public/runtimes/dotnet-wasm/9.0/. Copy that folder to share with another machine.",
       "version": "9.0",

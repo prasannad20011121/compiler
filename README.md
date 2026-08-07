@@ -8,6 +8,7 @@ A browser-based VS Code-style IDE where **all code execution happens locally in 
 | TypeScript | TS 5.9 compiler in worker → run as JS | TS 5.9.3 |
 | Python | Pyodide (CPython in WASM), self-hosted core | 3.14.2 |
 | C / C++ | clang 8 + lld in WASM (binji/wasm-clang) → WASI-ish shim | C11 / C++17 |
+| Java | real javac, built from OpenJDK source, run through TeaVM → WASM-GC | Java 25 |
 | C# | .NET 9 WASM + Roslyn in-browser compiler | .NET 9.0 |
 
 ## Structure
@@ -15,6 +16,7 @@ A browser-based VS Code-style IDE where **all code execution happens locally in 
 - `client/` — Angular IDE (Monaco, xterm.js, OPFS workspace, per-language WASM runners)
 - `server/` — Express + MongoDB API (auth + project save **only**; no execution endpoints, ever)
 - `csharp-wasm-runtime/` — Standalone C# .NET WASM AppBundle builder & pre-built zip installer
+- `java-wasm-runtime/` — Fork of konsoletyper/teavm-javac: builds real javac (from OpenJDK source) through TeaVM into WASM-GC
 
 ## Rules
 
@@ -57,4 +59,13 @@ npm start          # Starts Express server (requires MONGODB_URI)
   cd csharp-wasm-runtime
   .\build.ps1
   ```
+
+### 4. Java WASM Runtime Setup
+
+- **Rebuilding Java Runtime (Requires JDK 25 + network access to Maven Central and GitHub):**
+  ```bash
+  cd java-wasm-runtime
+  ./build.sh
+  ```
+  See `java-wasm-runtime/README.md` for what the build does and why it forks upstream.
 

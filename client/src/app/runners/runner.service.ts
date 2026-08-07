@@ -5,7 +5,7 @@ import { STDIN_SAB_BYTES, deliverStdinLine } from '../../workers/stdin-bridge';
 import { TerminalService } from '../core/terminal.service';
 import { WorkspaceService } from '../fs/workspace.service';
 
-type Language = 'js' | 'python' | 'cpp' | 'csharp';
+type Language = 'js' | 'python' | 'cpp' | 'java' | 'csharp';
 
 const LANGUAGE_BY_EXT: Record<string, Language> = {
   js: 'js',
@@ -17,6 +17,7 @@ const LANGUAGE_BY_EXT: Record<string, Language> = {
   cc: 'cpp',
   cpp: 'cpp',
   cxx: 'cpp',
+  java: 'java',
   cs: 'csharp',
 };
 
@@ -24,6 +25,7 @@ const LANGUAGE_LABEL: Record<Language, string> = {
   js: 'JavaScript/TypeScript',
   python: 'Python 3.14 (Pyodide)',
   cpp: 'C/C++ (clang → WASM)',
+  java: 'Java 25 (javac + TeaVM, self-built)',
   csharp: 'C# (.NET 9 WASM)',
 };
 
@@ -45,6 +47,7 @@ export class RunnerService {
   private activeWorker: Worker | null = null;
   private pythonWorker: Worker | null = null; // kept warm between runs
   private cppWorker: Worker | null = null; // kept warm — holds the compiled toolchain
+  private javaWorker: Worker | null = null;   // kept warm — holds the loaded javac
   private csharpWorker: Worker | null = null; // kept warm — holds the loaded .NET runtime
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private stdinSubscription: Subscription | null = null;
@@ -126,6 +129,14 @@ export class RunnerService {
         stdinSab: this.stdinSab,
         indexURL: `${location.origin}/runtimes/wasm-clang/${version}/`,
       });
+    } else if (language === 'java') {
+      const version = runtimesManifest.runtimes['teavm-javac'].version;
+      worker.postMessage({
+        type: 'run',
+        entry,
+        files,
+        indexURL: `${location.origin}/runtimes/teavm-javac/${version}/`,
+      });
     } else if (language === 'csharp') {
       const version = runtimesManifest.runtimes['dotnet-wasm'].version;
       worker.postMessage({
@@ -157,6 +168,10 @@ export class RunnerService {
       // Classic worker served straight from public/ — wraps the vendored toolchain driver.
       this.cppWorker ??= new Worker('/cpp-worker.js');
       return this.cppWorker;
+    }
+    if (language === 'java') {
+      this.javaWorker ??= new Worker('/java-worker.js', { type: 'module' });
+      return this.javaWorker;
     }
     if (language === 'csharp') {
       this.csharpWorker ??= new Worker('/csharp-worker.js', { type: 'module' });
@@ -208,6 +223,7 @@ export class RunnerService {
     this.activeWorker?.terminate();
     if (this.activeWorker === this.pythonWorker) this.pythonWorker = null;
     if (this.activeWorker === this.cppWorker) this.cppWorker = null;
+    if (this.activeWorker === this.javaWorker) this.javaWorker = null;
     if (this.activeWorker === this.csharpWorker) this.csharpWorker = null;
     this.activeWorker = null;
     this.running.set(false);

@@ -18,7 +18,7 @@
           ? 'Stop the running program'
           : runner.canRun(state.active())
             ? 'Runs 100% locally in your browser'
-            : 'Open a runnable file (.js / .ts / .py / .c / .cpp)'
+            : 'Open a runnable file (.js / .ts / .py / .c / .cpp / .java)'
       "
       (click)="run()"
     >
@@ -55,6 +55,6 @@
   <footer class="status-bar">
     <span>◈ local workspace (OPFS)</span>
     <span class="spacer"></span>
-    <span>runtimes: JS · TS · Python · C/C++ — all in-browser, zero server execution</span>
+    <span>runtimes: JS · TS · Python · C/C++ · Java 25 — all in-browser, zero server execution</span>
   </footer>
 </div>

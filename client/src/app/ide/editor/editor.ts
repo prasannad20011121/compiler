@@ -28,6 +28,7 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   cc: 'cpp',
   cxx: 'cpp',
   hpp: 'cpp',
+  java: 'java',
   json: 'json',
   md: 'markdown',
   html: 'html',

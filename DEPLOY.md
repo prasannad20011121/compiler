@@ -46,7 +46,7 @@ Open the Pages URL and check:
 - DevTools console: `crossOriginIsolated` → must be `true`.
 - Network tab: **zero cross-origin requests** on load (everything from your origin),
   and **zero requests of any kind when you press Run**.
-- Run one file per language: `.js`, `.ts`, `.py` (with `input()`), `.c`/`.cpp` (with `std::cin`).
+- Run one file per language: `.js`, `.ts`, `.py` (with `input()`), `.c`/`.cpp` (with `std::cin`), `.java`.
 - Second visit: runtimes come from the service-worker cache — Run works offline.
 - Sign in → Save workspace → open it on another machine.
 
