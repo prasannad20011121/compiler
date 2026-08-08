@@ -2,22 +2,22 @@
 
 This is a systematic bug hunt against the JWebAssembly compiler itself
 (`de.inetsoftware:jwebassembly-compiler:0.4`, the only version published to
-Maven Central), run through the same JDK-8 pipeline `build.sh` uses. 23 small
+Maven Central), run through the same JDK-8 pipeline `build.sh` uses. 25 small
 Java programs covering loops, arrays, inheritance, interfaces, switch,
 recursion, static fields/initializers, string concatenation, long/double
 math, lambdas, `ArrayList`, `StringBuilder`, boxing, varargs, generics,
-`instanceof`/casts, and five different try/catch/finally shapes were each
-compiled to `.wasm` and actually run in real Chromium via Playwright — not
-just checked for a clean `compileToBinary()`. Reproduction sources are in
-`bug-hunt/src/`.
+`instanceof`/casts, five different try/catch/finally shapes, and stdin
+input were each compiled to `.wasm` and actually run in real Chromium via
+Playwright — not just checked for a clean `compileToBinary()`. Reproduction
+sources are in `bug-hunt/src/`.
 
 Everything **not** listed below (loops, arrays incl. 2D, inheritance,
 interfaces, switch, recursion, static fields/init blocks, string
 concatenation, `long`/`double` math, lambdas, `ArrayList`, `StringBuilder`,
 boxing, varargs, generics, `instanceof`/casts, multi-catch, nested try/catch)
-compiled and ran correctly. The three bugs below are real, reproducible
-defects in JWebAssembly 0.4 itself, found empirically, not inferred from
-its docs or issue tracker.
+compiled and ran correctly. The four issues below are real, reproducible
+defects/gaps in JWebAssembly 0.4 itself, found empirically, not inferred
+from its docs or issue tracker.
 
 ## 1. `try { } catch (...) { } finally { }` emits invalid WebAssembly (severe)
 
@@ -98,6 +98,43 @@ on `ArrayIndexOutOfBoundsException` for correctness (not just as a safety
 net) will silently compute wrong answers under JWebAssembly's default mode.
 
 Repro: `bug-hunt/src/T19ArrayOOB.java`, run with `run(5)`.
+
+## 4. No stdin support at all — `System.in` is permanently null, `Scanner` doesn't even compile
+
+Two things were tested, both fail, for different reasons:
+
+- **`Scanner sc = new Scanner(System.in); sc.nextInt();`** — fails to
+  *compile*, before it's even a runtime question:
+  ```
+  WasmException: Abstract or native method can not be used:
+    sun/misc/Unsafe.objectFieldOffset(Ljava/lang/reflect/Field;)J
+  ```
+  Something in `Scanner`'s own implementation (likely its internal locking
+  or the `java.util.regex` machinery it uses for token matching) hits
+  `sun.misc.Unsafe.objectFieldOffset`, which `jwebassembly-api`'s polyfills
+  don't cover. `Scanner` is unusable with JWebAssembly 0.4, full stop — this
+  isn't a "write your own Scanner" situation like it was for TeaVM (which
+  had no Scanner at all but could otherwise compile arbitrary java.util
+  code); here the class itself can't be compiled.
+
+- **`System.in.read()`** (bypassing `Scanner` entirely) — *does* compile,
+  but `System.in` is never initialized to anything by JWebAssembly's
+  classlib (there's no import hook analogous to the `readStdinByte()` JS
+  import the TeaVM runtime added for real terminal input — see
+  `../java-wasm-runtime/README.md`). It's permanently `null`, so this
+  crashes at runtime with the exact same failure mode as bug #2 above: an
+  uncatchable JS `TypeError: Cannot read properties of null`, one layer
+  below Java's exception handling — `catch (IOException e)` around it does
+  nothing, because the crash isn't even a real Java exception.
+
+**Net effect: there is no way to read input in a JWebAssembly-compiled Java
+program**, short of hand-rolling a completely custom `@Import`-based
+byte-read function and routing all input through it yourself (mirroring how
+`println` in `examples/Hello.java` bypasses `System.out`) — and even that
+custom path can't be dressed up with `Scanner`'s parsing convenience, since
+`Scanner` itself won't compile.
+
+Repro: `bug-hunt/src/T24StdinRaw.java`, `T25Scanner.java`.
 
 ## Reproducing
 
