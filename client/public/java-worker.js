@@ -31,9 +31,30 @@ let stdinPayload = null;
 let stdinLineBytes = new Uint8Array(0);
 let stdinLinePos = 0;
 
+// System.out/err are buffered a character at a time (see putcharStdout/Stderr
+// below) and normally only flushed to the terminal on '\n' — but a prompt
+// printed with System.out.print (no trailing newline) immediately followed
+// by a blocking Scanner read would otherwise sit invisibly in this buffer
+// forever: readStdinByte's Atomics.wait blocks the whole worker thread, so
+// nothing here ever gets another turn to flush it on a later newline. So
+// readStdinByte flushes whatever's pending right before it blocks.
+let stdoutBuf = '';
+let stderrBuf = '';
+function flushPendingOutput() {
+  if (stdoutBuf) {
+    post({ type: 'stdout', text: stdoutBuf });
+    stdoutBuf = '';
+  }
+  if (stderrBuf) {
+    post({ type: 'stderr', text: stderrBuf });
+    stderrBuf = '';
+  }
+}
+
 /** Blocks the whole worker thread until the main thread delivers a line typed in the terminal. */
 function readStdinByte() {
   if (stdinLinePos >= stdinLineBytes.length) {
+    flushPendingOutput();
     Atomics.store(stdinState, 1, 0);
     Atomics.store(stdinState, 0, STDIN_STATE_REQUESTED);
     post({ type: 'stdin-request' });
@@ -157,33 +178,40 @@ self.onmessage = async (event) => {
 
     // Execute the compiled WASM-GC module right here, streaming console output.
     runtimeLoad ??= (await import(/* @vite-ignore */ `${base}compiler.wasm-runtime.js`)).load;
-    let stdout = '';
-    let stderr = '';
+    stdoutBuf = '';
+    stderrBuf = '';
     const module = await runtimeLoad(result.script, {
       stackDeobfuscator: { enabled: false },
       installImports(o) {
         o.teavmConsole.putcharStdout = (ch) => {
           if (ch === 0x0a) {
-            post({ type: 'stdout', text: stdout + '\n' });
-            stdout = '';
+            post({ type: 'stdout', text: stdoutBuf + '\n' });
+            stdoutBuf = '';
           } else {
-            stdout += String.fromCharCode(ch);
+            stdoutBuf += String.fromCharCode(ch);
           }
         };
         o.teavmConsole.putcharStderr = (ch) => {
           if (ch === 0x0a) {
-            post({ type: 'stderr', text: stderr + '\n' });
-            stderr = '';
+            post({ type: 'stderr', text: stderrBuf + '\n' });
+            stderrBuf = '';
           } else {
-            stderr += String.fromCharCode(ch);
+            stderrBuf += String.fromCharCode(ch);
           }
         };
         o.teavmConsole.readStdinByte = readStdinByte;
       },
     });
     module.exports.main([]);
-    if (stdout) post({ type: 'stdout', text: stdout + '\n' });
-    if (stderr) post({ type: 'stderr', text: stderr + '\n' });
+    // Unlike readStdinByte's mid-program flush (which must NOT add a
+    // newline — the point there is keeping a prompt and the input the user
+    // types on the same line), a leftover unterminated print at the very
+    // end should still get one, so the '✓ finished' status line below starts
+    // on its own line instead of being glued to the program's last output.
+    if (stdoutBuf) post({ type: 'stdout', text: stdoutBuf + '\n' });
+    if (stderrBuf) post({ type: 'stderr', text: stderrBuf + '\n' });
+    stdoutBuf = '';
+    stderrBuf = '';
     post({ type: 'done', ok: true, ms: Date.now() - started });
   } catch (error) {
     const message = error && error.message ? error.message : String(error);
