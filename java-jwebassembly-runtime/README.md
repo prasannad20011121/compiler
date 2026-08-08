@@ -150,14 +150,20 @@ constructs that were tested and worked fine, is in [`BUGS.md`](BUGS.md):
   `jwebassembly-api` — the `Thread.currentThread()` dependency in
   `PrintStream`'s init path isn't polyfilled, JDK 8 or not. Any real console
   output has to bypass `System.out` entirely (as `examples/Hello.java` does).
-- **No input support at all.** `Scanner` fails to *compile*
-  (`Unsafe.objectFieldOffset` used internally, unpolyfilled) — not usable in
-  any form. Raw `System.in.read()` compiles but `System.in` is never
-  initialized (no stdin import hook exists in this classlib at all, unlike
-  `../java-wasm-runtime/`'s `readStdinByte()`), so it's permanently `null`
-  and crashes the same uncatchable way as the NPE bug above —
-  `catch (IOException e)` around it does nothing. There's no way to read
-  input short of a fully custom `@Import`-based byte-read function.
+- **`System.in`/`Scanner` are both dead ends, but fixable the same way
+  `println` was.** `Scanner` fails to *compile* (`Unsafe.objectFieldOffset`
+  used internally, unpolyfilled). Raw `System.in.read()` compiles but
+  `System.in` is never initialized (no stdin import hook exists in this
+  classlib at all, unlike `../java-wasm-runtime/`'s `readStdinByte()`), so
+  it's permanently `null` and crashes the same uncatchable way as the NPE
+  bug above. The same custom-`@Import` bypass that makes `println` possible
+  also works for input — `bug-hunt/src/T26StdinWorkaround.java` verifies a
+  `readbyte` import + hand-rolled `readLine()` end-to-end in a real browser.
+  What that doesn't cover: real terminal input is asynchronous but Wasm
+  imports are synchronous calls, so wiring this to an actual keyboard would
+  need the same `SharedArrayBuffer`/`Atomics.wait` bridge
+  `java-wasm-runtime/`'s TeaVM runtime already built for this — reusable as
+  a mechanism, not attempted here. See `BUGS.md` #4.
 - **No live in-browser Java-source compilation is possible with
   JWebAssembly alone** — see "Architecture" above.
 
@@ -169,7 +175,7 @@ constructs that were tested and worked fine, is in [`BUGS.md`](BUGS.md):
 | Object model | Real WASM-GC (`struct`/`array` types), modern encoding | Non-GC only — GC mode is broken (obsolete RTT encoding); objects are sealed JS objects behind imported accessor functions |
 | `System.out` / `String.format` / printf | Works (patched — see `../java-wasm-runtime/README.md`) | `System.out` unsupported entirely; `String` basics only work with a JDK-8-run toolchain |
 | Exceptions | Catchable VM-thrown exceptions (array bounds, div-by-zero, NPE-adjacent cases), patched over several TeaVM bugs | User-thrown/caught exceptions verified working via native WASM EH; VM-level bounds/arithmetic traps are not caught at all in the default mode (see above) |
-| stdin | Real terminal stdin + a from-scratch `java.util.Scanner` | Tested and confirmed broken: `Scanner` doesn't compile; raw `System.in.read()` compiles but crashes (permanently-null `System.in`, no import hook exists) |
+| stdin | Real terminal stdin + a from-scratch `java.util.Scanner` | `System.in`/`Scanner` both broken, but a custom-import workaround (bypassing both, same pattern as `println`) verified working — see `BUGS.md` #4. Not wired to a real terminal here. |
 | Toolchain maturity | Actively maintained upstream (TeaVM), patched here for known WASM-GC backend bugs | Last released **2022** (`0.4`); GC-mode work is unreleased/unpublished |
 
 **Bottom line:** `java-wasm-runtime/` is the right choice for the IDE, and

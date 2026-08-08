@@ -99,7 +99,7 @@ net) will silently compute wrong answers under JWebAssembly's default mode.
 
 Repro: `bug-hunt/src/T19ArrayOOB.java`, run with `run(5)`.
 
-## 4. No stdin support at all — `System.in` is permanently null, `Scanner` doesn't even compile
+## 4. No stdin support at all — `System.in` is permanently null, `Scanner` doesn't even compile (workaround exists)
 
 Two things were tested, both fail, for different reasons:
 
@@ -127,14 +127,37 @@ Two things were tested, both fail, for different reasons:
   below Java's exception handling — `catch (IOException e)` around it does
   nothing, because the crash isn't even a real Java exception.
 
-**Net effect: there is no way to read input in a JWebAssembly-compiled Java
-program**, short of hand-rolling a completely custom `@Import`-based
-byte-read function and routing all input through it yourself (mirroring how
-`println` in `examples/Hello.java` bypasses `System.out`) — and even that
-custom path can't be dressed up with `Scanner`'s parsing convenience, since
-`Scanner` itself won't compile.
+**Net effect: `System.in` and `Scanner` are both dead ends** — but the same
+bypass that fixes `println` (a custom `@Import`-annotated native method,
+routed around the broken JDK class entirely) also fixes input.
+`bug-hunt/src/T26StdinWorkaround.java` adds a `readbyte` import next to
+`putchar`, builds a `readLine()` out of it with a plain `StringBuilder`
+loop, and uses it plus `Integer.parseInt` — verified working end-to-end in
+a real browser, fed two lines of mock input:
 
-Repro: `bug-hunt/src/T24StdinRaw.java`, `T25Scanner.java`.
+```
+input:  "42\nAda Lovelace\n"
+output: "Enter a number:\nYou entered: 42\nEnter your name:\nHello, Ada Lovelace!\n"
+result: 84   (42 * 2, returned from the exported function)
+```
+
+Run it: `./t.sh T26StdinWorkaround --eh && node run-stdin-demo.mjs`.
+
+This only proves the *mechanism* works, though — the mock in
+`run-stdin-demo.mjs` hands back a whole pre-supplied string synchronously,
+which is trivial in a test harness but not how a real terminal works. Wasm
+imports are synchronous calls, but real keyboard input arrives
+asynchronously, so a production `readbyte` would need the same
+`SharedArrayBuffer`/`Atomics.wait` synchronous-blocking bridge
+`../java-wasm-runtime/`'s `client/src/workers/stdin-bridge.ts` already
+built for the TeaVM runtime's real `System.in` — reusable as-is, since the
+bridge doesn't care which Wasm toolchain is calling into it. That
+integration wasn't attempted here; this directory only establishes that the
+underlying compile-time and runtime blockers are solvable with the same
+workaround pattern used for output, not that it's wired to a real terminal.
+
+Repro: `bug-hunt/src/T24StdinRaw.java`, `T25Scanner.java` (confirm the
+gap); `T26StdinWorkaround.java` + `run-stdin-demo.mjs` (the fix).
 
 ## Reproducing
 
