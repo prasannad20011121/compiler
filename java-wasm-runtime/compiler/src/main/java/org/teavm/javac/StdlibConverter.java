@@ -146,6 +146,19 @@ public class StdlibConverter extends ClassVisitor {
         if ((access & Opcodes.ACC_PUBLIC) == 0 && ((access & Opcodes.ACC_PROTECTED) == 0)) {
             return null;
         }
+        // Bridge methods (covariant-return-type overrides, generic-erasure overrides, etc.) are
+        // compiler-generated binary-compatibility artifacts, never written in source and never
+        // meant to be visible to source-level overload resolution — javac itself regenerates
+        // whatever bridges it needs from the real, non-bridge declaration. Letting one through
+        // here adds a second same-name-same-erased-parameter-types method to this declarations-
+        // only stub with no source-level override relationship to the real method (that
+        // relationship is exactly what ACC_BRIDGE strips), which javac then reports as an
+        // ambiguous overload — e.g. any generic class calling StringBuilder.append(T) where T's
+        // erasure is Object, since StringBuilder/AbstractStringBuilder's own covariant-return
+        // append(Object) override carries a bridge for exactly this reason.
+        if ((access & (Opcodes.ACC_BRIDGE | Opcodes.ACC_SYNTHETIC)) != 0) {
+            return null;
+        }
         desc = renameMethodDesc(desc);
         if (signature != null) {
             signature = renameMethodSignature(signature);
@@ -157,7 +170,22 @@ public class StdlibConverter extends ClassVisitor {
             }
         }
 
-        declaredMethods.add(name + desc);
+        // rename() collapses TeaVM's own "T"-prefixed classlib root types onto their real-JDK
+        // name — in particular org.teavm.classlib.java.lang.TObject onto java.lang.Object, same
+        // as any real java.lang.Object parameter/return already renames to. A class can
+        // legitimately declare a public method taking the real Object (for real-source-facing
+        // API surface, e.g. StringBuilder.append(Object)) *and*, separately, a
+        // protected/package-private method taking its own TObject (internal plumbing that real
+        // Java source can never reference — TObject isn't a type user code can spell) with an
+        // otherwise-identical signature; those two are distinct at TeaVM's own bytecode level but
+        // become indistinguishable once both renamed, which real javac can never have seen from a
+        // single real class (identical name+erased-descriptor is illegal in one real class file),
+        // so it always means one of the colliding declarations is this stub's own artifact, not a
+        // real overload — keep only the first one seen.
+        String key = name + desc;
+        if (!declaredMethods.add(key)) {
+            return null;
+        }
         if (name.length() > 1 && name.endsWith("0") && !name.startsWith("<")) {
             zeroAliasCandidates.add(new ZeroAliasCandidate(access, name, desc, signature, exceptions));
         }
