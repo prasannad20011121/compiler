@@ -103,6 +103,22 @@ below), so "the compiler was happy" is not evidence of anything on its own.
 
 ## What's broken
 
+Full write-up with repro sources for these three, plus the 20+ other
+constructs that were tested and worked fine, is in [`BUGS.md`](BUGS.md):
+
+- **`try { } catch (...) { } finally { }` emits invalid WebAssembly.** Any
+  try statement with both a `catch` and a `finally` on it "compiles"
+  without error but the emitted `.wasm` fails to even load:
+  `CompileError: ... function body must end with "end" opcode`. Plain
+  `try/finally` (no catch) and plain `try/catch` (no finally, incl.
+  multi-catch and nesting) both work fine — it's specifically the
+  combination that's broken. No workaround short of manually restructuring
+  every such block.
+- **A `NullPointerException` from a null field write isn't thrown by the
+  compiled code at all** — it crashes as an unrelated, uncatchable
+  `TypeError: Cannot set properties of null` thrown from inside
+  JWebAssembly's own JS shim, one layer below the Java program's control
+  flow, so `catch (NullPointerException e)` around it never runs.
 - **WASM-GC mode is non-functional in every current browser.**
   `JWebAssembly.WASM_USE_GC = "true"` compiles without error, but the
   emitted module uses `rtt.canon` / `struct.new_default_with_rtt` — an

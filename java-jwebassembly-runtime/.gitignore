@@ -1,3 +1,7 @@
 lib/
 classes/
 out/
+bug-hunt/classes/
+bug-hunt/out/
+bug-hunt/*.class
+bug-hunt/node_modules/
