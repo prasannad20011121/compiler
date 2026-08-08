@@ -13,8 +13,10 @@
 #   1. A genuine JDK 8 install (JAVA8_HOME, or /usr/lib/jvm/java-8-openjdk-amd64).
 #      This is not optional and `javac --release 8` on a newer JDK does NOT
 #      substitute for it — see "Why JDK 8, specifically" in README.md.
-#   2. Network access to Maven Central (repo1.maven.org) to fetch the
-#      JWebAssembly 0.4 jars (cached in lib/ after the first run).
+#   2. Network access to github.com (git) and Maven Central (repo1.maven.org)
+#      — jwebassembly-head-build/build.sh builds the compiler+api jars from
+#      pinned upstream source commits, not the stale 0.4 release; see that
+#      directory's README for why.
 #   3. Node + Playwright with a Chromium build available, for test/run.mjs.
 #
 # Run this script from the java-jwebassembly-runtime/ directory:
@@ -24,10 +26,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
 
-compiler_jar="lib/jwebassembly-compiler-0.4.jar"
-api_jar="lib/jwebassembly-api-0.4.jar"
-compiler_sha="ed7b7c39264235c28023b6a170644e3acffd9042281acc524e561ab7afb1c7ed"
-api_sha="b84243d55813c9420104d3087c10d7f888b234555d8a30e1c8ef1e54cb068c76"
+compiler_jar="lib/jwebassembly-compiler-head.jar"
+api_jar="lib/jwebassembly-api-head.jar"
 
 echo "=== JWebAssembly Hello demo build ==="
 
@@ -46,23 +46,11 @@ echo "  JAVA8_HOME: $java8_home"
 javac8="$java8_home/bin/javac"
 java8="$java8_home/bin/java"
 
-# ── 2. Fetch JWebAssembly 0.4 jars (cached, checksum-verified) ─────────────
+# ── 2. Build JWebAssembly compiler+api from pinned upstream source ─────────
 mkdir -p lib out classes
-fetch() {
-  local dest="$1" url="$2" want_sha="$3"
-  if [ -f "$dest" ] && echo "$want_sha  $dest" | sha256sum -c - >/dev/null 2>&1; then
-    return
-  fi
-  echo "  Fetching $(basename "$dest")..."
-  curl -fsSL -o "$dest" "$url"
-  echo "$want_sha  $dest" | sha256sum -c -
-}
-fetch "$compiler_jar" \
-  "https://repo1.maven.org/maven2/de/inetsoftware/jwebassembly-compiler/0.4/jwebassembly-compiler-0.4.jar" \
-  "$compiler_sha"
-fetch "$api_jar" \
-  "https://repo1.maven.org/maven2/de/inetsoftware/jwebassembly-api/0.4/jwebassembly-api-0.4.jar" \
-  "$api_sha"
+echo ""
+echo "  Building JWebAssembly from source (see jwebassembly-head-build/README.md)..."
+./jwebassembly-head-build/build.sh
 
 # ── 3. Compile the example + the compiler driver, both with real JDK 8 ─────
 echo ""

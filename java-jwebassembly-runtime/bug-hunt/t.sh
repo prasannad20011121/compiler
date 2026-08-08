@@ -3,7 +3,7 @@
 # jars ../build.sh already fetched into ../lib/. Run ../build.sh at least
 # once first.
 #
-# Usage: ./t.sh <ClassName> [--eh] [--gc]
+# Usage: ./t.sh <ClassName> [--eh] [--gc] [--ignorenative]
 set -uo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
@@ -19,8 +19,8 @@ fi
 javac8="$java8_home/bin/javac"
 java8="$java8_home/bin/java"
 
-compiler_jar="../lib/jwebassembly-compiler-0.4.jar"
-api_jar="../lib/jwebassembly-api-0.4.jar"
+compiler_jar="../lib/jwebassembly-compiler-head.jar"
+api_jar="../lib/jwebassembly-api-head.jar"
 if [ ! -f "$compiler_jar" ] || [ ! -f "$api_jar" ]; then
   echo "ERROR: ${compiler_jar} / ${api_jar} not found — run ../build.sh once first." >&2
   exit 1
@@ -32,6 +32,7 @@ for a in "$@"; do
   case "$a" in
     --eh) extra_props+=(-Djwa.eh=true) ;;
     --gc) extra_props+=(-Djwa.gc=true) ;;
+    --ignorenative) extra_props+=(-Djwa.ignorenative=true) ;;
   esac
 done
 

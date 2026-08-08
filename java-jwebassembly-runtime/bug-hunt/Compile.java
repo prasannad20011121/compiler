@@ -29,6 +29,9 @@ public class Compile {
         if ("true".equals(System.getProperty("jwa.gc"))) {
             wasm.setProperty(JWebAssembly.WASM_USE_GC, "true");
         }
+        if ("true".equals(System.getProperty("jwa.ignorenative"))) {
+            wasm.setProperty(JWebAssembly.IGNORE_NATIVE, "true");
+        }
         wasm.compileToBinary(output);
         System.out.println("compiled OK: " + output + " (" + output.length() + " bytes)");
     }
