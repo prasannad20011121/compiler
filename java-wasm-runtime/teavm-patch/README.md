@@ -210,6 +210,67 @@ contains an unrelated pre-existing copy-paste bug of its own: its own `DIVIDE` c
 essentially never seen outside synthetic test programs, as opposed to the runtime/variable case
 this fix actually targets — it's flagged as a known caveat rather than chased further this round.
 
+## `teavm-classlib` patch: `System.in` wired to real terminal input, plus a from-scratch `Scanner`
+
+`System.in` used to be a complete stub: `TConsoleInputStream.read()` unconditionally threw
+`EOFException`, so any program reading from stdin failed instantly, and `java.util.Scanner`
+didn't exist in TeaVM's classlib *at all* — not a bug in an existing implementation, a genuinely
+missing class. Fixing "Scanner and stdin" needed three pieces:
+
+1. **A real synchronous stdin transport.** This IDE already has a working mechanism for this,
+   shared by the C/C++ and Python workers: a `SharedArrayBuffer` + `Atomics.wait`/`Atomics.notify`
+   bridge (`client/src/workers/stdin-bridge.ts`) that blocks the *worker thread* (not the main/UI
+   thread, where blocking isn't allowed) until the main thread delivers a line typed in the
+   terminal. The Java worker (`client/public/java-worker.js`) just wasn't wired up to it —
+   `runner.service.ts`'s Java branch was the only language not passing `stdinSab` to its worker.
+   Fixed by passing it through (matching the C++/Python/C# branches exactly) and adding a
+   `readStdinByte()` function to `java-worker.js` that blocks via the same bridge, decodes a full
+   line the first time it's needed, and serves it back one byte at a time (mirroring
+   `cpp-worker.js`'s own `refillStdin`/`stdinStrPos` buffering) until a new line is needed.
+2. **A Wasm-GC import bridging that into compiled Java.** `WasmGCSupport.readStdinByte()`
+   (`core/runtime/gc/WasmGCSupport.java`) is a new `@Import(module = "teavmConsole", ...)` native
+   method — the same mechanism `putCharStdout`/`putCharStderr` already use for stdout/stderr,
+   just for input, wired to `java-worker.js`'s function above via
+   `installImports(o) { o.teavmConsole.readStdinByte = ...; }`. `TConsoleInputStream.read()`
+   (`classlib/java/lang/TConsoleInputStream.java`) now calls it (gated behind
+   `PlatformDetector.isWebAssemblyGC()`, the same runtime-branch-that-DCE-strips-per-target
+   pattern `JSStdoutPrintStream`/`JSStderrPrintStream` already use to call the analogous output
+   functions) instead of always throwing. There's no "close stdin" affordance in this browser
+   terminal, so reads block indefinitely for more input rather than ever returning real EOF —
+   matching how the C/C++ and Python workers' own interactive stdin already behaves in this IDE.
+3. **A `Scanner` implementation, from scratch** (`classlib/java/util/TScanner.java` +
+   `TInputMismatchException.java`, a new supporting exception `Scanner` throws on malformed
+   numeric/boolean tokens). The obvious alternative — `BufferedReader` wrapping an
+   `InputStreamReader`, both of which *do* already exist in TeaVM's classlib — doesn't compile
+   for Wasm-GC at all: `InputStreamReader` unconditionally allocates `TByteBuffer`/`TCharBuffer`
+   (java.nio) in its field initializers, and those classes have JS-target-only branches (guarded
+   by a runtime `PlatformDetector.isJavaScript()` check, not compile-time exclusion) using
+   `@JSByRef`-annotated methods (`Int8Array.fromJavaArray`) — which the Wasm-GC backend rejects
+   outright with `"@JSByRef, which is not supported in Wasm GC"`, regardless of which branch
+   would actually execute for this target. That's a NIO-wide gap, not a one-line fix, so rather
+   than chase it, `TScanner` reads bytes directly off the underlying `TInputStream` and decodes
+   UTF-8 by hand (mirroring `WasmGCSupport.nextCharArray()`'s existing manual decode elsewhere in
+   this fork), sidestepping `TByteBuffer`/`TCharBuffer`/`InputStreamReader` entirely. Covers the
+   subset real programs actually use: `next`/`nextLine`/`nextInt`/`nextLong`/`nextDouble`/
+   `nextFloat`/`nextBoolean` and their `hasNextXxx()` peek forms, whitespace-delimited
+   tokenizing, and both `Scanner(InputStream)` (for `System.in`, blocking/no-EOF as above) and
+   `Scanner(String)` (finite content, real EOF via `hasNext()`/`hasNextLine()` returning `false`).
+   Four-byte UTF-8 sequences (astral code points) decode to the replacement character rather than
+   a correct surrogate pair — a deliberate simplification, since console input essentially never
+   contains them.
+
+Verified end-to-end: a program blocking on `Scanner(System.in).nextInt()` after typing multiple
+space-separated tokens on one line, reading several subsequent lines, and a separate
+`Scanner(String)` correctly hitting real EOF, all work as expected; a raw byte-by-byte
+`System.in.read()` loop (no Scanner at all) confirms the underlying transport independently.
+
+**Known remaining gap:** `BufferedReader`/`InputStreamReader` over `System.in` still don't
+compile, for the NIO/`@JSByRef` reason explained above — `Scanner` is the way to read stdin in
+this runtime for now. Fixing `InputStreamReader` would mean either gating `TByteBuffer`/
+`TCharBuffer`'s JS-specific branches behind compile-time (not runtime) target exclusion, or
+rewriting `InputStreamReader` to avoid NIO the same way `Scanner` does above — a large enough
+change to `java.nio` itself that it wasn't attempted this round.
+
 ## Rebuilding
 
 `../build.sh` calls `apply.sh` in this directory automatically, which:
@@ -217,7 +278,7 @@ this fix actually targets — it's flagged as a known caveat rather than chased 
    reasoning as the OpenJDK source fetch documented in the main fork note).
 2. Copies the patched files in `classlib/` and `core/` over the corresponding paths in that
    checkout.
-3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched8` (bumped each
+3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched9` (bumped each
    time the patch set changes, since Gradle/mavenLocal can otherwise serve a stale cached
    artifact for a version string it's already seen).
 

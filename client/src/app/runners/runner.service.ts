@@ -135,6 +135,7 @@ export class RunnerService {
         type: 'run',
         entry,
         files,
+        stdinSab: this.stdinSab,
         indexURL: `${location.origin}/runtimes/teavm-javac/${version}/`,
       });
     } else if (language === 'csharp') {

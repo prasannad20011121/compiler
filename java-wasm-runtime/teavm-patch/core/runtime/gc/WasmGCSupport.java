@@ -62,6 +62,14 @@ public class WasmGCSupport {
     @Import(name = "putcharStderr", module = "teavmConsole")
     public static native void putCharStderr(char c);
 
+    // Blocks the whole worker thread (via a JS-side Atomics.wait on a SharedArrayBuffer) until
+    // a byte of real stdin input is available, returning it as 0-255. There's no EOF signal from
+    // the browser terminal in this environment (no "close stdin" affordance), so this never
+    // returns -1 - every read either yields a real byte or blocks indefinitely, matching the
+    // C/C++ and Python workers' own interactive-stdin behavior in this same IDE.
+    @Import(name = "readStdinByte", module = "teavmConsole")
+    public static native int readStdinByte();
+
     public static char[] nextCharArray() {
         var length = nextLEB();
         var result = new char[length];

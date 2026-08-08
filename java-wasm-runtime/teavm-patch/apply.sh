@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Clones TeaVM at the 0.13.1 tag, overlays the patched classlib+core files in this directory,
-# and publishes core+classlib to mavenLocal as version 0.13.1-patched8. See README.md in
+# and publishes core+classlib to mavenLocal as version 0.13.1-patched9. See README.md in
 # this directory for what's patched and why. Called automatically by ../build.sh.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src_cache="$script_dir/teavm-src-cache"
-patched_version="0.13.1-patched8"
+patched_version="0.13.1-patched9"
 
 if [ ! -d "$src_cache" ] || [ -z "$(ls -A "$src_cache" 2>/dev/null)" ]; then
   echo "  Fetching konsoletyper/teavm @ 0.13.1 (first run only, ~400 MB)..."
@@ -43,6 +43,12 @@ cp "$script_dir/core/runtime/gc/WasmGCSupport.java" \
   "$src_cache/core/src/main/java/org/teavm/backend/wasm/runtime/gc/WasmGCSupport.java"
 cp "$script_dir/core/gc/WasmGCDependencies.java" \
   "$src_cache/core/src/main/java/org/teavm/backend/wasm/gc/WasmGCDependencies.java"
+cp "$script_dir/classlib/java/lang/TConsoleInputStream.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/lang/TConsoleInputStream.java"
+cp "$script_dir/classlib/java/util/TScanner.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TScanner.java"
+cp "$script_dir/classlib/java/util/TInputMismatchException.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TInputMismatchException.java"
 
 echo "  Publishing patched core+classlib to mavenLocal as $patched_version..."
 (

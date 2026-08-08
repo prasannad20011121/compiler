@@ -9,10 +9,12 @@ teavm = "0.13.1"
 # WasmGCVirtualTableBuilder dropping a method's vtable implementor whenever TeaVM's
 # devirtualization pass hadn't independently marked that method "virtual" — which left calls like
 # e.getMessage() on a caught VM-thrown exception invoking a null function reference at runtime —
-# and new core codegen making integer divide-by-zero/modulo-by-zero throw a catchable
-# ArithmeticException instead of an uncatchable raw Wasm trap. Everything else stays on the real
-# published 0.13.1 — this isn't a general TeaVM upgrade, just these specific fixes.
-teavmPatched = "0.13.1-patched8"
+# new core codegen making integer divide-by-zero/modulo-by-zero throw a catchable
+# ArithmeticException instead of an uncatchable raw Wasm trap, and a classlib fix wiring
+# System.in up to real terminal input (via a new WasmGCSupport.readStdinByte() JS import) plus a
+# from-scratch java.util.Scanner (TeaVM's classlib never had one at all). Everything else stays
+# on the real published 0.13.1 — this isn't a general TeaVM upgrade, just these specific fixes.
+teavmPatched = "0.13.1-patched9"
 asm = "9.8"
 
 [libraries]

@@ -9,7 +9,10 @@
  * module is then loaded and executed here, with System.out/err streamed to
  * the terminal. All .java files in the workspace are compiled together, so
  * classes may reference each other; exactly one file may contain a valid
- * main method. System.in is not supported by the TeaVM console runtime.
+ * main method. System.in reads real terminal input via the same
+ * SharedArrayBuffer + Atomics.wait bridge the C/C++ and Python workers use
+ * (see ../src/workers/stdin-bridge.ts) — java-wasm-runtime's teavm-patch
+ * wires this into TConsoleInputStream/WasmGCSupport.readStdinByte.
  */
 'use strict';
 
@@ -18,6 +21,31 @@ let compilerWorker = null;
 let compilerReady = null;
 let runtimeLoad = null;
 let nextId = 1;
+
+const STDIN_STATE_IDLE = 0;
+const STDIN_STATE_REQUESTED = 1;
+let stdinState = null;
+let stdinPayload = null;
+// Bytes of the current line (UTF-8, with a trailing '\n' appended) not yet
+// consumed by readStdinByte — refilled one line at a time from the bridge.
+let stdinLineBytes = new Uint8Array(0);
+let stdinLinePos = 0;
+
+/** Blocks the whole worker thread until the main thread delivers a line typed in the terminal. */
+function readStdinByte() {
+  if (stdinLinePos >= stdinLineBytes.length) {
+    Atomics.store(stdinState, 1, 0);
+    Atomics.store(stdinState, 0, STDIN_STATE_REQUESTED);
+    post({ type: 'stdin-request' });
+    Atomics.wait(stdinState, 0, STDIN_STATE_REQUESTED);
+    const length = Atomics.load(stdinState, 1);
+    const line = new TextDecoder().decode(stdinPayload.slice(0, length));
+    Atomics.store(stdinState, 0, STDIN_STATE_IDLE);
+    stdinLineBytes = new TextEncoder().encode(line + '\n');
+    stdinLinePos = 0;
+  }
+  return stdinLineBytes[stdinLinePos++];
+}
 
 const post = (m) => self.postMessage(m);
 
@@ -97,8 +125,12 @@ function formatDiagnostic(d) {
 }
 
 self.onmessage = async (event) => {
-  const { files, indexURL } = event.data;
+  const { files, indexURL, stdinSab } = event.data;
   base = indexURL;
+  if (stdinSab) {
+    stdinState = new Int32Array(stdinSab, 0, 2);
+    stdinPayload = new Uint8Array(stdinSab, 8);
+  }
   const started = Date.now();
 
   try {
@@ -146,6 +178,7 @@ self.onmessage = async (event) => {
             stderr += String.fromCharCode(ch);
           }
         };
+        o.teavmConsole.readStdinByte = readStdinByte;
       },
     });
     module.exports.main([]);

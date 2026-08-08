@@ -85,15 +85,31 @@
 >   `WasmGCDependencies` fix for a `getMessage()`-shaped reachability gap
 >   that otherwise broke `ArithmeticException`'s own Wasm-GC struct
 >   generation. See `teavm-patch/README.md` for the three-part writeup.
+> - `System.in` now reads real terminal input instead of always throwing
+>   `EOFException`, wired to the same `SharedArrayBuffer`/`Atomics.wait`
+>   synchronous stdin bridge (`client/src/workers/stdin-bridge.ts`) the
+>   C/C++ and Python workers already used — the Java worker just wasn't
+>   passing it through. `java.util.Scanner` — entirely absent from TeaVM's
+>   classlib, not merely broken — is now implemented from scratch, reading
+>   bytes directly off `System.in` and decoding UTF-8 by hand rather than
+>   going through `BufferedReader`/`InputStreamReader` (which don't compile
+>   at all for Wasm-GC — see `teavm-patch/README.md`). Covers
+>   next/nextLine/nextInt/nextLong/nextDouble/nextFloat/nextBoolean, their
+>   hasNextXxx() forms, and both `Scanner(System.in)` (blocks for more
+>   input; there's no stdin-close affordance in this terminal, so it never
+>   really hits EOF) and `Scanner(String)` (finite content, real EOF).
 >
 > Known remaining gaps (real, but need changes to TeaVM's own core/classlib
-> beyond what's patched so far — out of scope for now): `Scanner`/
-> `BufferedReader` over `System.in` don't compile or crash the WASM-GC
-> backend; a *literal* constant division like `5 / 0` written directly in
-> source still crashes with the old uncatchable raw trap — the divide-by-zero
-> fix above only covers the general (non-literal-constant) case, and
-> something upstream of normal codegen handles literal-constant divisions
-> differently in a way not yet root-caused; and `e.toString()` /
+> beyond what's patched so far — out of scope for now): `BufferedReader`/
+> `InputStreamReader` over `System.in` still don't compile for Wasm-GC — a
+> `java.nio` (`TByteBuffer`/`TCharBuffer`) limitation, not something fixed
+> by the stdin/Scanner work above (`Scanner` is the supported way to read
+> stdin in this runtime for now); a *literal* constant division like
+> `5 / 0` written directly in source still crashes with the old uncatchable
+> raw trap — the divide-by-zero fix above only covers the general
+> (non-literal-constant) case, and something upstream of normal codegen
+> handles literal-constant divisions differently in a way not yet
+> root-caused; and `e.toString()` /
 > `e.getClass().getName()` on a VM-thrown exception still crash — a
 > *different, deeper* bug than the `getMessage()` one just fixed.
 > `Throwable.toString()`'s body is stripped entirely by TeaVM's main
@@ -106,8 +122,8 @@
 > just the WASM-GC backend module patched so far — meaningfully bigger and
 > riskier, so not attempted. All gaps here were confirmed present in the
 > original teavm.org-hosted binary too (except the array-bounds,
-> `getMessage()`, and divide-by-zero bugs fixed above), i.e. pre-existing
-> upstream limitations, not regressions introduced by this fork.
+> `getMessage()`, divide-by-zero, and stdin/`Scanner` fixes above), i.e.
+> pre-existing upstream limitations, not regressions introduced by this fork.
 >
 > Run `./build.sh` from this directory to rebuild; see that script for
 > prerequisites. Output goes to `../client/public/runtimes/teavm-javac/25/`,
