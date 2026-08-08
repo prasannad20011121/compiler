@@ -9,3 +9,4 @@ build
 node_modules
 **/teavm-local.properties
 jdk-src-cache/
+teavm-patch/teavm-src-cache/

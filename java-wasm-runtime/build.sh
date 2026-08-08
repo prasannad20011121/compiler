@@ -8,8 +8,8 @@
 #   1. JDK 25   -> apt install openjdk-25-jdk (or https://jdk.java.net/25/)
 #   2. Network access to Maven Central and github.com (git, not just https).
 #
-# This is a fork of konsoletyper/teavm-javac (Apache-2.0) with two changes,
-# both explained inline where they're made:
+# This is a fork of konsoletyper/teavm-javac (Apache-2.0) with several changes,
+# explained inline where they're made and in this directory's README.md:
 #   - settings.gradle no longer lists the teavm.org custom Maven repo. Every
 #     artifact this build actually needs (TeaVM 0.13.1, ASM 9.8) is on Maven
 #     Central; some sandboxed environments block teavm.org specifically.
@@ -17,6 +17,10 @@
 #     git checkout (javac/jdk-src-cache/) instead of downloading a zip from
 #     GitHub's archive endpoint, which some sandboxed environments also block
 #     even though git's own smart-HTTP protocol goes through fine.
+#   - teavm-patch/ builds a patched TeaVM core+classlib from source and
+#     publishes it to mavenLocal (see teavm-patch/README.md) — works around a
+#     WASM-GC backend bug that crashed every printf/String.format call using
+#     a float conversion, and adds missing %n format-specifier support.
 #
 # Run this script from the java-wasm-runtime/ directory:
 #     ./build.sh
@@ -67,12 +71,17 @@ else
   echo "  Using cached OpenJDK source at $src_cache"
 fi
 
-# ── 3. Build (javac from OpenJDK source -> TeaVM -> WASM-GC) ───────────────
+# ── 3. Build & publish the patched TeaVM core+classlib this fork needs ─────
+echo ""
+echo "  Building patched TeaVM (see teavm-patch/README.md)..."
+./teavm-patch/apply.sh
+
+# ── 4. Build (javac from OpenJDK source -> TeaVM -> WASM-GC) ───────────────
 echo ""
 echo "  Running ./gradlew :compiler:build ..."
 ./gradlew :compiler:build
 
-# ── 4. Copy output artifacts ────────────────────────────────────────────────
+# ── 5. Copy output artifacts ────────────────────────────────────────────────
 mkdir -p "$out_dir"
 cp compiler/build/generated/teavm/wasm-gc/compiler.wasm "$out_dir/"
 cp compiler/build/generated/teavm/wasm-gc/compiler.wasm-runtime.js "$out_dir/"
