@@ -61,6 +61,22 @@
 >   unpatched one (`teavm-tooling` transitively depends on plain `0.13.1`,
 >   and Gradle ranks an unsuffixed version higher than a suffixed one).
 >
+> - Calling `e.getMessage()` on a caught VM-thrown exception (array-bounds,
+>   implicit null pointer, etc. — as opposed to one the program throws
+>   itself) used to crash with `"dereferencing a null pointer"`, even though
+>   the `catch` itself worked fine. Root cause: TeaVM's WASM-GC backend only
+>   gave a method a real vtable implementor if its own whole-program
+>   devirtualization pass had independently flagged that method as needing
+>   virtual dispatch — but `Throwable.getMessage()` is never overridden
+>   anywhere, so devirtualization correctly decided nothing needs a
+>   *virtual* call to `Throwable`'s own copy, while the backend's separate
+>   per-call-site scan still allocated `ArrayIndexOutOfBoundsException` its
+>   own vtable entry for `getMessage()` (since `e`'s static type at the call
+>   site is the concrete exception class, not `Throwable`) — leaving that
+>   entry's implementor permanently null. Fixed in
+>   `teavm-patch/core/gc/vtable/WasmGCVirtualTableBuilder.java`; see that
+>   directory's README for the full writeup.
+>
 > Known remaining gaps (real, but need changes to TeaVM's own core/classlib
 > beyond what's patched so far — out of scope for now): `Scanner`/
 > `BufferedReader` over `System.in` don't compile or crash the WASM-GC
@@ -68,30 +84,21 @@
 > still uncatchable — TeaVM's WASM-GC backend lowers integer `/`/`%`
 > directly to the raw `i32.div_s`/`i32.rem_s` instructions with no
 > check-and-throw wrapper at all (unlike array bounds, this needs new
-> codegen, not a bug fix, so it wasn't attempted); and a newly-exposed
-> caveat on the array-bounds/NPE fix above — the `catch` block itself now
-> runs correctly (including `instanceof`-style exception-type matching and
-> printing literal text), but calling an instance method on the caught
-> exception object itself — `e.getMessage()`, `e.toString()`, or
-> `e.getClass()` — crashes the same way the whole catch used to. Confirmed
-> for both `ArrayIndexOutOfBoundsException` and implicit `NullPointerException`,
-> so it's general to VM-constructed exceptions, not specific to bounds
-> checks; user code doing `throw new RuntimeException("msg")` and calling
-> `.getMessage()` on that is unaffected. Suspected cause: `WasmGCSupport
-> .npe()`/`.aiiobe()`/`.cce()` (the helper methods the WASM-GC backend
-> calls to construct these exceptions) are wired in directly at codegen
-> time via `WasmGCGenerationContext`'s function cache rather than through
-> the normal instruction-level dependency-analysis flow, so the resulting
-> object's class metadata (vtable) may end up incomplete for virtual
-> dispatch even though the exception's own type is still recognized
-> correctly by `catch`. Not root-caused with full confidence, and not
-> fixed — this needs deeper tracing through `WasmGCClassInfoProvider`'s
-> vtable generation than was attempted this round. Was very likely already
-> broken in stock TeaVM 0.13.1 too, just unreachable before, since these
-> exceptions weren't catchable at all until now. All gaps here were
-> confirmed present in the original teavm.org-hosted binary too (except
-> the two array-bounds bugs fixed above), i.e. pre-existing upstream
-> limitations, not regressions introduced by this fork.
+> codegen, not a bug fix, so it wasn't attempted); and `e.toString()` /
+> `e.getClass().getName()` on a VM-thrown exception still crash — a
+> *different, deeper* bug than the `getMessage()` one just fixed.
+> `Throwable.toString()`'s body is stripped entirely by TeaVM's main
+> dependency analyzer before the WASM-GC backend ever runs, because that
+> analyzer (unlike the backend's own call-site scan) never recognized
+> `e.toString()` on a catch-bound variable as real usage — so there's no
+> body left for the backend to wire up, and the `getMessage()` fix can't
+> help. Fixing this means changing the shared, cross-backend dependency
+> analyzer's handling of exception values flowing out of `catch` blocks, not
+> just the WASM-GC backend module patched so far — meaningfully bigger and
+> riskier, so not attempted. All gaps here were confirmed present in the
+> original teavm.org-hosted binary too (except the array-bounds and
+> `getMessage()` bugs fixed above), i.e. pre-existing upstream limitations,
+> not regressions introduced by this fork.
 >
 > Run `./build.sh` from this directory to rebuild; see that script for
 > prerequisites. Output goes to `../client/public/runtimes/teavm-javac/25/`,
