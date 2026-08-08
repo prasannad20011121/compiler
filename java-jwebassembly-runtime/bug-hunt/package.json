@@ -1,8 +1,0 @@
-{
-  "name": "java-jwebassembly-runtime-bug-hunt",
-  "private": true,
-  "type": "module",
-  "devDependencies": {
-    "playwright": "^1.56.1"
-  }
-}
