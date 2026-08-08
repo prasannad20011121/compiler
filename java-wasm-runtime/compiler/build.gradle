@@ -14,6 +14,28 @@ configurations {
     dist {
         transitive = false
     }
+    // teavm-tooling transitively depends on the real, unpatched org.teavm:teavm-core:0.13.1.
+    // Without forcing this, Gradle's default conflict resolution picks that real version over
+    // our explicitly-requested teavmPatched one (an unsuffixed version outranks a suffixed one
+    // in Gradle's comparison) for every configuration compileClasspath feeds into — including
+    // generateWasmGC's whole-program analysis of this module, which is what actually determines
+    // the TeaVM core code baked into compiler.wasm. Silently losing this fight is why the
+    // WasmGCTarget.setStrict(true) fix in Compiler.java had no effect until this was added.
+    all {
+        resolutionStrategy.force "org.teavm:teavm-core:${libs.versions.teavmPatched.get()}"
+        resolutionStrategy.eachDependency { details ->
+            // teavm-core's own POM (published under the patched version) references sibling
+            // modules — asm/hppc/rhino relocations, metaprogramming-api, etc. — at that same
+            // patched version. We only patched+published core and classlib, so redirect every
+            // other org.teavm module back to the real, unpatched release actually available.
+            if (details.requested.group == "org.teavm"
+                    && details.requested.name != "teavm-core"
+                    && details.requested.name != "teavm-classlib"
+                    && details.requested.version == libs.versions.teavmPatched.get()) {
+                details.useVersion(libs.versions.teavm.get())
+            }
+        }
+    }
 }
 
 dependencies {

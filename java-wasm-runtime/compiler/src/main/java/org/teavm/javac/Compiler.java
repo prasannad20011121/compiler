@@ -255,6 +255,15 @@ public final class Compiler {
         var mainClass = options.getMainClass().stringValue();
 
         var target = new WasmGCTarget();
+        // TeaVMBuilder.setStrict() below only sets the DependencyAnalyzer's strict flag (stricter
+        // dependency resolution) — WasmGCTarget has its OWN separate "strict" flag, defaulting to
+        // false, that gates whether array-bounds and null checks get inserted at all (see
+        // WasmGCTarget.beforeInlining/beforeOptimizations, gated by "if (strict)"). Without this,
+        // TeaVM emits no check before array element access/dereference, so any out-of-bounds
+        // access or null dereference in a compiled Java program traps at the raw Wasm instruction
+        // level (uncatchable by the program's own try/catch) instead of throwing a real, catchable
+        // ArrayIndexOutOfBoundsException/NullPointerException.
+        target.setStrict(true);
         var refCache = new ReferenceCache();
         if (classSource == null) {
             resourceProvider = new MemoryResourceProvider(List.of(teavmClasslibFiles, classFiles, outputFiles));

@@ -1,12 +1,13 @@
 [versions]
 
 teavm = "0.13.1"
-# core+classlib only: locally built & published (see java-wasm-runtime/README.md's fork note) from
-# TeaVM's own 0.13.1 tag with a targeted classlib patch to TDecimalFormat's symbol-copying, working
-# around a WASM-GC backend bug (Object.clone()'s result becoming unusable after being cast back to
-# its own type) that crashed every printf/String.format call. Everything else stays on the real
-# published 0.13.1 — this isn't a general TeaVM upgrade, just this one classlib fix.
-teavmPatched = "0.13.1-patched1"
+# core+classlib only: locally built & published (see teavm-patch/README.md) from TeaVM's own
+# 0.13.1 tag with targeted patches — a classlib fix for TDecimalFormat's symbol-copying (worked
+# around a WASM-GC backend bug that crashed every printf/String.format call) and a core fix for
+# BoundCheckInsertion incorrectly eliding array bounds checks when both the index and array size
+# are compile-time constants without comparing their actual values. Everything else stays on the
+# real published 0.13.1 — this isn't a general TeaVM upgrade, just these specific fixes.
+teavmPatched = "0.13.1-patched5"
 asm = "9.8"
 
 [libraries]

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Clones TeaVM at the 0.13.1 tag, overlays the patched classlib files in this directory,
-# and publishes core+classlib to mavenLocal as version 0.13.1-patched1. See README.md in
+# Clones TeaVM at the 0.13.1 tag, overlays the patched classlib+core files in this directory,
+# and publishes core+classlib to mavenLocal as version 0.13.1-patched5. See README.md in
 # this directory for what's patched and why. Called automatically by ../build.sh.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src_cache="$script_dir/teavm-src-cache"
-patched_version="0.13.1-patched1"
+patched_version="0.13.1-patched5"
 
 if [ ! -d "$src_cache" ] || [ -z "$(ls -A "$src_cache" 2>/dev/null)" ]; then
   echo "  Fetching konsoletyper/teavm @ 0.13.1 (first run only, ~400 MB)..."
@@ -20,11 +20,13 @@ else
   echo "  Using cached TeaVM source at $src_cache"
 fi
 
-echo "  Overlaying patched classlib files..."
+echo "  Overlaying patched classlib + core files..."
 cp "$script_dir/classlib/java/util/TFormatter.java" \
   "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TFormatter.java"
 cp "$script_dir/classlib/java/text/TDecimalFormat.java" \
   "$src_cache/classlib/src/main/java/org/teavm/classlib/java/text/TDecimalFormat.java"
+cp "$script_dir/core/model/transformation/BoundCheckInsertion.java" \
+  "$src_cache/core/src/main/java/org/teavm/model/transformation/BoundCheckInsertion.java"
 
 echo "  Publishing patched core+classlib to mavenLocal as $patched_version..."
 (
