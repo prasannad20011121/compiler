@@ -130,13 +130,85 @@ backend, not just WASM-GC, so it wasn't attempted this round. `getClass()` alone
 `.getName()` or `toString()`) does not reliably crash — likely because it reads class metadata
 through a different, special-cased path — but chaining anything through `toString()` still does.
 
-**Divide-by-zero and modulo-by-zero** (`ArithmeticException`) are still uncatchable. Unlike
-array bounds, there's no existing (but misconfigured) check-and-throw mechanism to fix — TeaVM's
-WASM-GC backend (`BaseWasmGenerationVisitor.visit(BinaryExpr)`) lowers integer `/` and `%`
-directly to the raw `i32.div_s`/`i32.rem_s` WASM instructions with no check at all. Making this
-catchable would mean adding new codegen (emit a zero-check and throw `ArithmeticException`
-before the division), not patching an existing pass — a materially bigger and riskier change
-than the fixes above, so it hasn't been attempted.
+## `teavm-core` patch: divide-by-zero/modulo-by-zero made catchable (new codegen)
+
+Unlike array bounds, there was no existing-but-misconfigured check-and-throw mechanism to fix
+here — TeaVM's WASM-GC backend (`BaseWasmGenerationVisitor.visit(BinaryExpr)`) lowered integer
+`/` and `%` directly to the raw `i32.div_s`/`i64.div_s`/`i32.rem_s`/`i64.rem_s` Wasm instructions
+with no check at all, so `5 / 0` (or, much more commonly, a variable divisor that happens to be
+zero at runtime) hard-crashed the whole module with an uncatchable low-level trap instead of
+throwing a catchable `ArithmeticException`. This needed genuinely new codegen, not a bug fix, so
+it's a bigger change than the others in this document — three separate problems had to be found
+and fixed together for it to actually work end-to-end:
+
+1. **New managed check-and-throw wrapper** in
+   `core/generate/common/methods/BaseWasmGenerationVisitor.java`
+   (`generateIntDivisionWithZeroCheck`), replacing the old direct
+   `i32.div_s`/`i64.div_s`/`i32.rem_s`/`i64.rem_s` codegen for `DIVIDE` and integer `MODULO`.
+   The **first attempt** used the same "branch with result" pattern as the existing null-check
+   and array-bounds-check codegen (`WasmBranch` + `.setResult(...)`, wrapped in `WasmDrop` when
+   the branch isn't taken) — but that pattern is only safe when the "result" value being carried
+   is something already-computed and side-effect-free (a plain local read), which is true for
+   null/bounds checks but NOT here: the "result" would be the division itself, i.e. exactly the
+   operation whose safety depends on the branch outcome. Wasm's `br_if` renders the carried
+   result *before* evaluating the branch condition (confirmed by reading
+   `WasmBinaryRenderingVisitor.visit(WasmBranch)`), so that first attempt computed the
+   (potentially trapping) division unconditionally regardless of the guard — it never actually
+   prevented anything. Fixed by switching to a real `WasmConditional` (`if`/`then`/`else`, the
+   same construct `visit(ConditionalExpr)` above uses for Java's `?:` operator), which lazily
+   evaluates only the taken arm: the division lives in the `then` block (only reached once the
+   divisor is confirmed nonzero), the throw lives in the `else` block.
+2. **New runtime helper**: `WasmGCSupport.ae()` in
+   `core/runtime/gc/WasmGCSupport.java` (`return new ArithmeticException("/ by zero");`,
+   matching the existing `npe()`/`aiiobe()`/`cce()` pattern exactly), wired up via a new
+   `WasmGCGenerationContext.aeMethod()` (`core/generate/gc/methods/WasmGCGenerationContext.java`)
+   and a new `generateThrowArithmeticException()` override in
+   `core/generate/gc/methods/WasmGCGenerationVisitor.java`. For completeness (so the classic,
+   non-GC Wasm backend this fork doesn't use still compiles), a parallel
+   `ExceptionHandling.throwArithmeticException()` was added to `core/runtime/ExceptionHandling.java`
+   and wired into `core/generate/WasmGenerationVisitor.java` the same way that backend wires
+   `throwNullPointerException`/`throwArrayIndexOutOfBoundsException`.
+3. **The real blocker, found only after step 1 and 2 compiled fine in isolation**: calling
+   `ae()` from real test programs crashed with a *Wasm module compile-time validation error*
+   (`WebAssembly.compile(): ... expected 1 elements on the stack for fallthru, found 0`) — not a
+   runtime trap. Root-caused by dumping the actual generated Wasm-GC module bytes out of the
+   browser (via a temporary hook in the compiler worker) and reading the module's own `name`
+   custom section with a small standalone script (general Wasm-GC tooling like `wabt`/`wasm2wat`
+   couldn't parse TeaVM's Wasm-GC output at all, even recent versions — a dead end): the error
+   was inside `WasmGCSupport::ae` itself, and swapping `ae()` for the already-working `npe()` in
+   the same call site made it disappear, isolating the fault to `ArithmeticException` specifically
+   — not the new `WasmConditional` codegen, and not `ae()`'s own trivial body (a no-arg
+   `new ArithmeticException()` failed identically). The actual cause: `WasmGCDependencies
+   .contributeExceptionUtils()` explicitly registers `npe()`/`aiiobe()`/`cce()` with TeaVM's
+   *main* dependency analyzer (`analyzer.linkMethod(...).use()`) so their exception classes get
+   properly processed through the normal, early reachability pipeline — the same pipeline
+   responsible for generating a class's real Wasm-GC struct type. `ae()` was never added to that
+   list, so `ArithmeticException` was reachable *only* through the codegen-time function cache
+   (`context.aeMethod()`) — precisely the same kind of "helper method bypasses normal dependency
+   analysis" gap documented in the `getMessage()` section above, just manifesting as a
+   mismatched/fallback struct type at Wasm validation time instead of a null vtable slot at
+   runtime. `NullPointerException`/`ArrayIndexOutOfBoundsException`/`ClassCastException` never
+   hit this because they're already reachable through countless other paths throughout the
+   classlib; `ArithmeticException` had no other path in a small test program. Fixed by adding
+   `analyzer.linkMethod(new MethodReference(WasmGCSupport.class, "ae",
+   ArithmeticException.class)).use();` to `contributeExceptionUtils()` in
+   `core/gc/WasmGCDependencies.java`, matching the existing `npe`/`aiiobe`/`cce` lines exactly.
+
+All three fixes were required together — verified via a variable-divisor test
+(`int x = a / b;` where `b` is 0 at runtime, not a literal), which now compiles, throws a real
+catchable `ArithmeticException`, and either gets caught by a matching `try`/`catch` or is
+reported the same way any other uncaught exception is when there's no catch.
+
+**Known remaining gap:** a *literal* constant division like `5 / 0` written directly in source
+still crashes with the old raw, uncatchable trap — the fix above only covers the general case,
+where the division's operands come from anywhere other than two Java compile-time-constant
+literals. Something upstream of `visit(BinaryExpr)` handles that narrower literal-constant case
+differently (not yet root-caused — a next candidate would be `org.teavm.model.Interpreter`, an
+IR-level constant-folding evaluator that TeaVM's own optimizer passes use, though it also
+contains an unrelated pre-existing copy-paste bug of its own: its own `DIVIDE` case computes
+`a * b` instead of `a / b`). Since this only affects literal-constant divisors — an edge case
+essentially never seen outside synthetic test programs, as opposed to the runtime/variable case
+this fix actually targets — it's flagged as a known caveat rather than chased further this round.
 
 ## Rebuilding
 
@@ -145,7 +217,7 @@ than the fixes above, so it hasn't been attempted.
    reasoning as the OpenJDK source fetch documented in the main fork note).
 2. Copies the patched files in `classlib/` and `core/` over the corresponding paths in that
    checkout.
-3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched7` (bumped each
+3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched8` (bumped each
    time the patch set changes, since Gradle/mavenLocal can otherwise serve a stale cached
    artifact for a version string it's already seen).
 

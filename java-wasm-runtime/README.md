@@ -76,15 +76,24 @@
 >   entry's implementor permanently null. Fixed in
 >   `teavm-patch/core/gc/vtable/WasmGCVirtualTableBuilder.java`; see that
 >   directory's README for the full writeup.
+> - Integer divide-by-zero and modulo-by-zero (`5 / 0` where the divisor
+>   comes from a variable, computed value, etc. — not a source-literal
+>   constant) now throw a catchable `ArithmeticException` instead of hard
+>   crashing with an uncatchable raw Wasm trap. This needed genuinely new
+>   codegen (TeaVM's WASM-GC backend had no existing check-and-throw
+>   mechanism for arithmetic at all, unlike array bounds) plus a
+>   `WasmGCDependencies` fix for a `getMessage()`-shaped reachability gap
+>   that otherwise broke `ArithmeticException`'s own Wasm-GC struct
+>   generation. See `teavm-patch/README.md` for the three-part writeup.
 >
 > Known remaining gaps (real, but need changes to TeaVM's own core/classlib
 > beyond what's patched so far — out of scope for now): `Scanner`/
 > `BufferedReader` over `System.in` don't compile or crash the WASM-GC
-> backend; divide-by-zero and modulo-by-zero (`ArithmeticException`) are
-> still uncatchable — TeaVM's WASM-GC backend lowers integer `/`/`%`
-> directly to the raw `i32.div_s`/`i32.rem_s` instructions with no
-> check-and-throw wrapper at all (unlike array bounds, this needs new
-> codegen, not a bug fix, so it wasn't attempted); and `e.toString()` /
+> backend; a *literal* constant division like `5 / 0` written directly in
+> source still crashes with the old uncatchable raw trap — the divide-by-zero
+> fix above only covers the general (non-literal-constant) case, and
+> something upstream of normal codegen handles literal-constant divisions
+> differently in a way not yet root-caused; and `e.toString()` /
 > `e.getClass().getName()` on a VM-thrown exception still crash — a
 > *different, deeper* bug than the `getMessage()` one just fixed.
 > `Throwable.toString()`'s body is stripped entirely by TeaVM's main
@@ -96,9 +105,9 @@
 > analyzer's handling of exception values flowing out of `catch` blocks, not
 > just the WASM-GC backend module patched so far — meaningfully bigger and
 > riskier, so not attempted. All gaps here were confirmed present in the
-> original teavm.org-hosted binary too (except the array-bounds and
-> `getMessage()` bugs fixed above), i.e. pre-existing upstream limitations,
-> not regressions introduced by this fork.
+> original teavm.org-hosted binary too (except the array-bounds,
+> `getMessage()`, and divide-by-zero bugs fixed above), i.e. pre-existing
+> upstream limitations, not regressions introduced by this fork.
 >
 > Run `./build.sh` from this directory to rebuild; see that script for
 > prerequisites. Output goes to `../client/public/runtimes/teavm-javac/25/`,
