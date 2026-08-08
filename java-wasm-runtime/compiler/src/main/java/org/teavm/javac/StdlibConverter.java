@@ -23,7 +23,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -50,9 +52,28 @@ public class StdlibConverter extends ClassVisitor {
     };
     boolean visible;
     String className;
+    private final Set<String> declaredMethods = new LinkedHashSet<>();
+    private final List<ZeroAliasCandidate> zeroAliasCandidates = new ArrayList<>();
 
     public StdlibConverter(ClassVisitor cv) {
         super(Opcodes.ASM9, cv);
+    }
+
+    /**
+     * TeaVM's classlib exposes methods that would collide with a real JDK final/native method
+     * (Object.getClass(), Throwable.getMessage(), etc.) under a "0"-suffixed name (getClass0,
+     * getMessage0, ...) — necessary in TeaVM's own source since it's compiled against a real JDK
+     * for testing, but TeaVM's real WASM codegen (runtime-classlib-teavm.bin path) knows to route
+     * calls to the real name through to the "0" implementation. This compile-time classlib
+     * (javac's view of the SDK, produced by this converter) never had that same routing added, so
+     * javac rejects any call to the real name (e.g. "cannot find symbol: method getMessage()").
+     * Since this archive is declarations-only (addFile() reads with SKIP_CODE), adding a same-
+     * descriptor sibling declaration with the "0" stripped is a safe, no-body alias: it can't
+     * change behavior (there's no code here to begin with), it only widens what javac accepts.
+     * Guarded by declaredMethods so a real, distinct method already using that name is never
+     * shadowed or duplicated.
+     */
+    private record ZeroAliasCandidate(int access, String name, String desc, String signature, String[] exceptions) {
     }
 
     @Override
@@ -69,6 +90,8 @@ public class StdlibConverter extends ClassVisitor {
 
         visible = true;
         className = name;
+        declaredMethods.clear();
+        zeroAliasCandidates.clear();
         if (superName != null) {
             superName = rename(superName);
         }
@@ -133,12 +156,32 @@ public class StdlibConverter extends ClassVisitor {
                 exceptions[i] = rename(exceptions[i]);
             }
         }
+
+        declaredMethods.add(name + desc);
+        if (name.length() > 1 && name.endsWith("0") && !name.startsWith("<")) {
+            zeroAliasCandidates.add(new ZeroAliasCandidate(access, name, desc, signature, exceptions));
+        }
+
         return new MethodVisitorImpl(super.visitMethod(access, name, desc, signature, exceptions));
     }
 
     @Override
     public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
         return super.visitAnnotation(desc, visible);
+    }
+
+    @Override
+    public void visitEnd() {
+        for (ZeroAliasCandidate candidate : zeroAliasCandidates) {
+            String realName = candidate.name().substring(0, candidate.name().length() - 1);
+            String key = realName + candidate.desc();
+            if (!declaredMethods.contains(key)) {
+                declaredMethods.add(key);
+                super.visitMethod(candidate.access(), realName, candidate.desc(), candidate.signature(),
+                        candidate.exceptions()).visitEnd();
+            }
+        }
+        super.visitEnd();
     }
 
     class FieldVisitorImpl extends FieldVisitor {

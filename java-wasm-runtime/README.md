@@ -2,9 +2,10 @@
 > [konsoletyper/teavm-javac](https://github.com/konsoletyper/teavm-javac)
 > vendored into this repo so the WASM Java compiler used by `client/`'s
 > Java runner is built here from real OpenJDK source, rather than trusted
-> as a pre-built binary downloaded from teavm.org. Two changes from
-> upstream, both to work around network restrictions in some sandboxed
-> build environments (neither changes what gets built):
+> as a pre-built binary downloaded from teavm.org.
+>
+> Build-environment changes from upstream, none of which change what gets
+> built (network workarounds only):
 > - `settings.gradle` drops the `teavm.org` custom Maven repo — everything
 >   it was needed for (TeaVM 0.13.1, ASM 9.8) is on Maven Central.
 > - `javac/build.gradle` can source the pinned OpenJDK commit from a local
@@ -14,6 +15,36 @@
 > - The `ui/` module (upstream's standalone CodeMirror-based playground) is
 >   dropped — this repo already has its own IDE UI in `client/`, and only
 >   `:compiler:build` (the `javac`, `protocol`, `compiler` modules) is used.
+>
+> Behavioral changes from upstream, fixing real gaps found in testing
+> (both are declaration/protocol-only — no TeaVM core or classlib code is
+> touched, so this stays within teavm-javac's own project):
+> - `compiler/.../StdlibConverter.java` — the compile-time SDK classlib
+>   TeaVM's `teavm-classlib` exposes final/native real-JDK methods (like
+>   `Throwable.getMessage()`, `Object.getClass()`) only under a "0"-suffixed
+>   name (`getMessage0()`) that TeaVM's own WASM codegen knows to route to,
+>   but this converter never re-exposed under the real name — so javac
+>   rejected any call to e.g. `e.getMessage()`. `visitEnd()` now emits a
+>   declaration-only alias (this archive is stripped of method bodies
+>   already) under the real name wherever one doesn't already exist,
+>   fixing this for every class, not just Throwable.
+> - `protocol/CompileMessage.java` + `compiler/.../Worker.java` — the
+>   simple worker protocol's `compile` command took one source file
+>   (hardcoded to `Main.java`); the underlying `Compiler` API already
+>   supported adding several. Added a `files: {path, content}[]` field
+>   (the old single-`text` field still works as a fallback) so a workspace
+>   with multiple `.java` files compiles them together — one may reference
+>   another, so long as exactly one file has a `main` method.
+>
+> Known remaining gaps (real, but need changes to TeaVM's own core/classlib,
+> not just this fork — out of scope for now): `Scanner`/`BufferedReader`
+> over `System.in` don't compile or crash the WASM-GC backend; `printf`/
+> `String.format` crash at runtime (`Formatter` is incompletely
+> implemented); implicit VM-thrown exceptions (array-bounds, divide-by-
+> zero) aren't catchable by user `try`/`catch` — only explicitly-thrown
+> exceptions are. All confirmed present in the original teavm.org-hosted
+> binary too, i.e. pre-existing upstream limitations, not regressions
+> introduced by this fork.
 >
 > Run `./build.sh` from this directory to rebuild; see that script for
 > prerequisites. Output goes to `../client/public/runtimes/teavm-javac/25/`,

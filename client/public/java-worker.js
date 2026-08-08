@@ -7,8 +7,9 @@
  * Architecture: a nested "compiler worker" runs compiler.wasm and speaks the
  * teavm-javac protocol (load-classlib / compile). The resulting WASM-GC
  * module is then loaded and executed here, with System.out/err streamed to
- * the terminal. Single-file programs (class Main); System.in is not
- * supported by the TeaVM console runtime.
+ * the terminal. All .java files in the workspace are compiled together, so
+ * classes may reference each other; exactly one file may contain a valid
+ * main method. System.in is not supported by the TeaVM console runtime.
  */
 'use strict';
 
@@ -96,24 +97,17 @@ function formatDiagnostic(d) {
 }
 
 self.onmessage = async (event) => {
-  const { entry, files, indexURL } = event.data;
+  const { files, indexURL } = event.data;
   base = indexURL;
   const started = Date.now();
 
   try {
     await ensureCompiler();
 
-    const source = files.find((f) => f.path === entry)?.content ?? '';
     const javaFiles = files.filter((f) => f.path.endsWith('.java'));
-    if (javaFiles.length > 1) {
-      post({
-        type: 'system',
-        text: 'note: the in-browser javac compiles a single file — running only ' + entry,
-      });
-    }
 
     let hadErrors = false;
-    const result = await request({ command: 'compile', text: source }, (d) => {
+    const result = await request({ command: 'compile', files: javaFiles }, (d) => {
       const text = formatDiagnostic(d);
       if ((d.severity || '').toLowerCase() === 'error') {
         hadErrors = true;

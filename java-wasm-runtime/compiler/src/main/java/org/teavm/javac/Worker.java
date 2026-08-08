@@ -24,6 +24,7 @@ import org.teavm.javac.protocol.CompileMessage;
 import org.teavm.javac.protocol.CompilerDiagnosticMessage;
 import org.teavm.javac.protocol.ErrorMessage;
 import org.teavm.javac.protocol.LoadStdlibMessage;
+import org.teavm.javac.protocol.SourceFileEntry;
 import org.teavm.javac.protocol.TeaVMDiagnosticMessage;
 import org.teavm.javac.protocol.TeaVMPhaseMessage;
 import org.teavm.javac.protocol.WorkerMessage;
@@ -97,7 +98,16 @@ public final class Worker {
     }
 
     private void compileAll(CompileMessage request) throws IOException {
-        createSourceFile(request.getText());
+        compiler.clearSourceFiles();
+        var files = request.getFiles();
+        if (files != null && files.getLength() > 0) {
+            for (int i = 0; i < files.getLength(); ++i) {
+                SourceFileEntry file = files.get(i);
+                compiler.addSourceFile(file.getPath(), file.getContent());
+            }
+        } else {
+            createSourceFile(request.getText());
+        }
 
         CompilationResultMessage response = JSObjects.createWithoutProto();
         response.setId(request.getId());

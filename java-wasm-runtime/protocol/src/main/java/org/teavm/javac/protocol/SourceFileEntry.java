@@ -1,5 +1,5 @@
 /*
- *  Copyright 2017 Alexey Andreev.
+ *  Copyright 2025 Alexey Andreev.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -16,21 +16,20 @@
 
 package org.teavm.javac.protocol;
 
+import org.teavm.jso.JSObject;
 import org.teavm.jso.JSProperty;
-import org.teavm.jso.core.JSArray;
 
-public interface CompileMessage extends WorkerMessage {
-    /** Single-file compile: legacy field, still honored when {@link #getFiles()} is absent. */
+/** One {@code path}/{@code content} pair in a {@link CompileMessage}'s {@code files} list. */
+public interface SourceFileEntry extends JSObject {
     @JSProperty
-    String getText();
-
-    @JSProperty
-    void setText(String text);
-
-    /** Multi-file compile: every entry is added as a source file before compiling. */
-    @JSProperty
-    JSArray<SourceFileEntry> getFiles();
+    String getPath();
 
     @JSProperty
-    void setFiles(JSArray<SourceFileEntry> files);
+    void setPath(String path);
+
+    @JSProperty
+    String getContent();
+
+    @JSProperty
+    void setContent(String content);
 }
