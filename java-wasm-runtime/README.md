@@ -77,14 +77,29 @@
 >   `teavm-patch/core/gc/vtable/WasmGCVirtualTableBuilder.java`; see that
 >   directory's README for the full writeup.
 > - Integer divide-by-zero and modulo-by-zero (`5 / 0` where the divisor
->   comes from a variable, computed value, etc. — not a source-literal
+>   comes from a variable, computed value, etc. — not a JLS compile-time
 >   constant) now throw a catchable `ArithmeticException` instead of hard
 >   crashing with an uncatchable raw Wasm trap. This needed genuinely new
 >   codegen (TeaVM's WASM-GC backend had no existing check-and-throw
 >   mechanism for arithmetic at all, unlike array bounds) plus a
 >   `WasmGCDependencies` fix for a `getMessage()`-shaped reachability gap
 >   that otherwise broke `ArithmeticException`'s own Wasm-GC struct
->   generation. See `teavm-patch/README.md` for the three-part writeup.
+>   generation — *and*, found in a later regression pass, a fourth bug: an
+>   unrelated constant-folding pass in `BoundCheckInsertion` (used for
+>   array-bounds-check elimination) computed `a / b` directly in Java with
+>   no zero guard, crashing the compiler itself before the new codegen was
+>   ever reached — which is why the three-part fix above looked like it had
+>   never taken effect at all. See `teavm-patch/README.md` for the full
+>   writeup.
+> - A broken diagnostic-message template: parameterized compiler error
+>   messages (e.g. `"Method is not annotated with {{c0}}"`) rendered with
+>   the literal, unsubstituted `{{c0}}` placeholder still in them instead of
+>   the actual class/method/field name. `TeaVMDiagnostic.getMessage()`
+>   (`compiler/src/main/java/org/teavm/javac/TeaVMDiagnostic.java`) computed
+>   the correctly-rendered message into a local variable and then returned
+>   the raw, unrendered template instead of it — a one-line fix, affecting
+>   every parameterized diagnostic in the compiler, not just reflection
+>   errors (where it was first noticed).
 > - `System.in` now reads real terminal input instead of always throwing
 >   `EOFException`, wired to the same `SharedArrayBuffer`/`Atomics.wait`
 >   synchronous stdin bridge (`client/src/workers/stdin-bridge.ts`) the
@@ -104,11 +119,15 @@
 > `InputStreamReader` over `System.in` still don't compile for Wasm-GC — a
 > `java.nio` (`TByteBuffer`/`TCharBuffer`) limitation, not something fixed
 > by the stdin/Scanner work above (`Scanner` is the supported way to read
-> stdin in this runtime for now); a *literal* constant division like
-> `5 / 0` written directly in source still crashes with the old uncatchable
-> raw trap — the divide-by-zero fix above only covers the general
-> (non-literal-constant) case, and something upstream of normal codegen
-> handles literal-constant divisions differently in a way not yet
+> stdin in this runtime for now); a divisor that's a genuine JLS
+> compile-time constant (a `final` local or `static final` field
+> initialized with a constant expression — `javac` folds these to a bare
+> `iconst`/`idiv` at the bytecode level, no local-variable indirection
+> survives) still crashes with the old uncatchable raw trap, even though
+> the same bytecode compiles and runs correctly when fed directly to the
+> patched `teavm-core` on a plain host JVM, bypassing this fork's
+> self-hosted javac-in-`compiler.wasm` bootstrap — pointing at something
+> bootstrap-specific rather than a shared codegen defect, not yet
 > root-caused; and `e.toString()` /
 > `e.getClass().getName()` on a VM-thrown exception still crash — a
 > *different, deeper* bug than the `getMessage()` one just fixed.

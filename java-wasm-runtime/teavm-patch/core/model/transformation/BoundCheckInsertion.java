@@ -268,9 +268,20 @@ public class BoundCheckInsertion {
                         r = Integer.compare(a, b);
                         break;
                     case DIVIDE:
+                        // Unlike ADD/SUB/MUL/etc, DIVIDE and MODULO can throw for constant-propagated
+                        // operands (divisor 0) - this pass only tracks values for bounds-check
+                        // elimination, so bail out (treat the result as non-constant) instead of
+                        // letting a zero divisor crash the compiler itself with a real
+                        // ArithmeticException while it's just analyzing the user's program.
+                        if (b == 0) {
+                            return;
+                        }
                         r = a / b;
                         break;
                     case MODULO:
+                        if (b == 0) {
+                            return;
+                        }
                         r = a % b;
                         break;
                     case MULTIPLY:

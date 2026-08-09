@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Clones TeaVM at the 0.13.1 tag, overlays the patched classlib+core files in this directory,
-# and publishes core+classlib to mavenLocal as version 0.13.1-patched9. See README.md in
+# and publishes core+classlib to mavenLocal as version 0.13.1-patched10. See README.md in
 # this directory for what's patched and why. Called automatically by ../build.sh.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src_cache="$script_dir/teavm-src-cache"
-patched_version="0.13.1-patched9"
+patched_version="0.13.1-patched10"
 
 if [ ! -d "$src_cache" ] || [ -z "$(ls -A "$src_cache" 2>/dev/null)" ]; then
   echo "  Fetching konsoletyper/teavm @ 0.13.1 (first run only, ~400 MB)..."

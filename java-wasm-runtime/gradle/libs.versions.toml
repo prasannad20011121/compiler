@@ -12,9 +12,14 @@ teavm = "0.13.1"
 # new core codegen making integer divide-by-zero/modulo-by-zero throw a catchable
 # ArithmeticException instead of an uncatchable raw Wasm trap, and a classlib fix wiring
 # System.in up to real terminal input (via a new WasmGCSupport.readStdinByte() JS import) plus a
-# from-scratch java.util.Scanner (TeaVM's classlib never had one at all). Everything else stays
+# from-scratch java.util.Scanner (TeaVM's classlib never had one at all), and a fix to
+# BoundCheckInsertion's own constant-folding of DIVIDE/MODULO (it computed a real Java a/b to
+# track values for bounds-check elimination, unconditionally - a zero divisor crashed the
+# compiler itself with a real ArithmeticException before codegen ever ran, which is why the
+# divide-by-zero codegen fix above never took effect for any divisor TeaVM could constant-fold,
+# i.e. almost every test case short of a genuinely runtime-only value). Everything else stays
 # on the real published 0.13.1 — this isn't a general TeaVM upgrade, just these specific fixes.
-teavmPatched = "0.13.1-patched9"
+teavmPatched = "0.13.1-patched10"
 asm = "9.8"
 
 [libraries]

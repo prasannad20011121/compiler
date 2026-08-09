@@ -199,16 +199,49 @@ All three fixes were required together — verified via a variable-divisor test
 catchable `ArithmeticException`, and either gets caught by a matching `try`/`catch` or is
 reported the same way any other uncaught exception is when there's no catch.
 
-**Known remaining gap:** a *literal* constant division like `5 / 0` written directly in source
-still crashes with the old raw, uncatchable trap — the fix above only covers the general case,
-where the division's operands come from anywhere other than two Java compile-time-constant
-literals. Something upstream of `visit(BinaryExpr)` handles that narrower literal-constant case
-differently (not yet root-caused — a next candidate would be `org.teavm.model.Interpreter`, an
-IR-level constant-folding evaluator that TeaVM's own optimizer passes use, though it also
-contains an unrelated pre-existing copy-paste bug of its own: its own `DIVIDE` case computes
-`a * b` instead of `a / b`). Since this only affects literal-constant divisors — an edge case
-essentially never seen outside synthetic test programs, as opposed to the runtime/variable case
-this fix actually targets — it's flagged as a known caveat rather than chased further this round.
+**Follow-up: the "verified" case above was not actually fixed until a fourth problem was found.**
+A later regression pass (re-testing this exact scenario, plus three more divisor shapes: `final`
+locals, a `static final` field, and a genuinely runtime-only value from an empty array's
+`.length`) found that *every* variant still crashed with the old raw trap — the three fixes above
+were real and necessary, but not sufficient. Root cause: `model/transformation/
+BoundCheckInsertion.java` (already a patched file in this fork — see the array-bounds section
+above) does a *separate*, IR-level constant-folding pass over every `BinaryInstruction` to track
+known values for its own bounds-check-elimination purposes, unrelated to the codegen fix above.
+Its `DIVIDE`/`MODULO` cases computed `a / b` / `a % b` directly in Java with no zero guard —
+so for *any* division where both operands were resolvable to compile-time constants by this
+pass's own (intraprocedural, not full javac-level) dataflow tracking, a zero divisor crashed
+**the compiler itself** with a real, uncaught `java.lang.ArithmeticException` while it was still
+analyzing the program — before `generateIntDivisionWithZeroCheck` was ever reached. Running
+self-hosted (as `compiler.wasm`, itself compiled by this same buggy code, one bootstrapping level
+up), that internal Java exception becomes an unmanaged raw Wasm trap, indistinguishable from the
+original bug it was supposed to be a fix for — which is exactly why it went undetected: the retest
+after the original three-part fix used a plain `a / b` local-variable case that this pass also
+happens to constant-fold, so it looked identically broken and was mistaken for the original
+uncatchable-trap bug never having been fixed at all. Fixed by guarding both cases with
+`if (b == 0) { return; }` (bailing out of folding, matching the existing `default: return;`
+pattern for operations this pass doesn't handle) instead of computing the division. Confirmed via
+a minimal harness that invokes the patched `teavm-core` directly against a plain host JVM
+(bypassing the self-hosted compiler entirely, for fast iteration) as well as this fork's actual
+runtime: variable-divisor and runtime-only-divisor cases (e.g. an empty array's `.length`) now
+correctly compile, run, and throw a real catchable `ArithmeticException`.
+
+**Known remaining gap, now narrower:** a divisor that's a genuine **JLS compile-time constant** —
+a `final` local or `static final` field initialized with a constant expression, not just "some
+value BoundCheckInsertion's own tracking happens to resolve" — still crashes. `javac` itself
+constant-folds these at the bytecode level (confirmed via `javap`: `final int a = 5; final int
+b = 0; int x = a / b;` compiles to a bare `iconst_5; iconst_0; idiv`, with no `iload` at all, i.e.
+no local-variable indirection survives to be analyzed one way or the other). Compiling that exact
+`.class` bytecode directly against the patched `teavm-core` on a plain host JVM (the same fast
+harness used above) produces a **correct**, working checked division — so the codegen and every
+IR-level pass checked so far (`BoundCheckInsertion`, now fixed; `GlobalValueNumbering`, already
+correctly zero-guarded) handle this bytecode shape fine in isolation. Yet the same source,
+compiled by this fork's actual self-hosted javac-in-`compiler.wasm` and run through the real
+runtime, still crashes with the old raw trap. This points to something specific to the
+self-hosted bootstrap path (self-hosted javac producing different bytecode than a stock host
+javac would for this case, or some other self-hosting-specific divergence) rather than a shared
+defect in TeaVM's core codegen — not yet root-caused, and set aside as a known caveat, since a
+literal/constant-expression divisor remains an edge case essentially never seen outside synthetic
+test programs.
 
 ## `teavm-classlib` patch: `System.in` wired to real terminal input, plus a from-scratch `Scanner`
 
@@ -278,7 +311,7 @@ change to `java.nio` itself that it wasn't attempted this round.
    reasoning as the OpenJDK source fetch documented in the main fork note).
 2. Copies the patched files in `classlib/` and `core/` over the corresponding paths in that
    checkout.
-3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched9` (bumped each
+3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched10` (bumped each
    time the patch set changes, since Gradle/mavenLocal can otherwise serve a stale cached
    artifact for a version string it's already seen).
 
