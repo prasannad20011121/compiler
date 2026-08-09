@@ -113,6 +113,21 @@
 >   hasNextXxx() forms, and both `Scanner(System.in)` (blocks for more
 >   input; there's no stdin-close affordance in this terminal, so it never
 >   really hits EOF) and `Scanner(String)` (finite content, real EOF).
+> - Three more bugs found by testing hand-written, realistic programs (graph
+>   algorithms, an expression parser, custom `Iterable`/`Iterator`
+>   implementations, enums with per-constant method bodies, etc.) against
+>   this runtime and a real JVM side by side: `Map.Entry` (and other nested
+>   classlib types accessed via `Outer.Inner` syntax) was unresolvable —
+>   `StdlibConverter`, which renames TeaVM's internal classlib names onto
+>   real-JDK ones for the compile-time type-checking stub, never renamed
+>   `InnerClasses` attribute entries, so javac went looking for a class file
+>   at the stale, unrenamed path; `Integer`/`Long`/`Double`/`Float.sum(a, b)`
+>   didn't exist in TeaVM's classlib at all (needed for idioms like
+>   `Map.merge(key, val, Integer::sum)`); and `Iterator.remove()` was
+>   declared abstract instead of `default` (a Java 8 change TeaVM's classlib
+>   predates), so any hand-written `Iterator` that — like most real code —
+>   only overrides `hasNext()`/`next()` failed to compile. See
+>   `teavm-patch/README.md` for the full writeups.
 >
 > Known remaining gaps (real, but need changes to TeaVM's own core/classlib
 > beyond what's patched so far — out of scope for now): `BufferedReader`/

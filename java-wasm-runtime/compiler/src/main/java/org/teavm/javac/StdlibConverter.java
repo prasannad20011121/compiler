@@ -198,6 +198,24 @@ public class StdlibConverter extends ClassVisitor {
         return super.visitAnnotation(desc, visible);
     }
 
+    // Without this override, ASM's default ClassVisitor.visitInnerClass() passes the inner/outer
+    // class names straight through unrenamed - e.g. Map's InnerClasses entry for its nested
+    // Entry interface pointed at the original org/teavm/classlib/java/util/TMap$Entry instead of
+    // the renamed java/util/Map$Entry every other reference to that type in this stub actually
+    // uses. javac resolves qualified-nested-type syntax (Map.Entry) through this attribute, so it
+    // went looking for a class file at the stale, unrenamed path - which doesn't exist in this
+    // archive - and failed with "cannot find symbol: class Entry". innerName (the simple, already
+    // real "Entry") needs no renaming, only the fully-qualified name/outerName do, same as every
+    // other class-name reference this converter rewrites (superName, interfaces, exceptions, ...).
+    @Override
+    public void visitInnerClass(String name, String outerName, String innerName, int access) {
+        name = rename(name);
+        if (outerName != null) {
+            outerName = rename(outerName);
+        }
+        super.visitInnerClass(name, outerName, innerName, access);
+    }
+
     @Override
     public void visitEnd() {
         for (ZeroAliasCandidate candidate : zeroAliasCandidates) {

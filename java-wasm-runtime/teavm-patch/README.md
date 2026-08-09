@@ -304,6 +304,62 @@ this runtime for now. Fixing `InputStreamReader` would mean either gating `TByte
 rewriting `InputStreamReader` to avoid NIO the same way `Scanner` does above — a large enough
 change to `java.nio` itself that it wasn't attempted this round.
 
+## Compiler module fix: broken `{{c0}}`-style diagnostic messages
+
+Not a `teavm-patch/` file — this one lives in this project's own compiler module
+(`compiler/src/main/java/org/teavm/javac/TeaVMDiagnostic.java`), which wraps TeaVM's `Problem`
+objects for the JS-facing compiler API. TeaVM's diagnostics use a small template language for
+parameterized messages (`"Method is not annotated with {{c0}}"`, substituted from `Problem`'s
+`params` array via `Problem.render(ProblemTextConsumer)`). `TeaVMDiagnostic.getMessage()`
+correctly rendered the substituted text into a local `message` variable — then returned
+`problem.getText()` (the raw, unrendered template) instead of it. Every parameterized diagnostic
+in the compiler showed the literal, unfilled `{{c0}}`/`{{m0}}`/etc. placeholder instead of the
+actual class/method/field name; first noticed via reflection error messages, but not specific to
+them. One-line fix: return `message`.
+
+## Compiler module fix: `Map.Entry` (and other nested classlib types) unresolvable
+
+Also not a `teavm-patch/` file — `compiler/src/main/java/org/teavm/javac/StdlibConverter.java`,
+which builds the compile-time classlib stub (`compile-classlib-teavm.bin`) that real javac reads
+for type-checking, by walking TeaVM's own classlib bytecode through a custom ASM `ClassVisitor`
+and renaming TeaVM's internal `org.teavm.classlib.java.X.TY` names onto their real-JDK `java.X.Y`
+equivalents (e.g. `TMap` → `Map`). Any program iterating a map with an explicit
+`Map.Entry<K, V>` type — an extremely common idiom — failed with `"cannot find symbol: class
+Entry location: interface java.util.Map"`, even though `java/util/Map$Entry.class` demonstrably
+exists in the stub archive. Root cause: `StdlibConverter` renames every other class-name
+reference it touches (`superName`, `interfaces`, `exceptions`, field/method descriptor types) but
+never overrode `visitInnerClass()`, so ASM's default pass-through left `Map`'s `InnerClasses`
+attribute entry for `Entry` pointing at the original, unrenamed
+`org/teavm/classlib/java/util/TMap$Entry` — a path that doesn't exist in this renamed archive.
+javac resolves qualified-nested-type syntax (`Outer.Inner`) through exactly this attribute, so it
+went looking for a class file at the stale path and failed. Fixed by adding a `visitInnerClass()`
+override that renames `name`/`outerName` the same way every other reference is renamed
+(`innerName`, the simple unqualified name, needs no renaming — it was already correct).
+
+## `teavm-classlib` patch: three small missing/wrong classlib members
+
+Found via a batch of hand-written, non-synthetic test programs (graph algorithms, a recursive
+descent expression parser, a generic BST, custom exception hierarchies, a hand-written
+`Iterable`/`Iterator`, enums with per-constant method bodies, etc.) run against both this runtime
+and a real JVM for comparison. Two gaps, three fixes:
+
+- **`Integer/Long/Double/Float.sum(a, b)` didn't exist at all** in TeaVM's classlib (`TInteger`/
+  `TLong`/`TDouble`/`TFloat`), unlike `min`/`max` which TeaVM already has (backed by `TMath`).
+  `sum()` has no `Math` equivalent to delegate to since there's no `Math.sum` in real Java either
+  — it's a real JDK 8 addition to the boxed wrapper classes specifically, commonly reached via a
+  method reference (`Map.merge(key, val, Integer::sum)`, `Collectors.summingInt`, reduce
+  operations). Added as trivial one-line bodies (`return a + b;`) matching the real JDK's own
+  trivial implementation, to all four classes.
+- **`Iterator.remove()` was declared abstract**, not `default`, in `TIterator` — TeaVM's classlib
+  predates Java 8's addition of a default `remove()` (`throw new
+  UnsupportedOperationException("remove")`) that made overriding it optional. Any hand-written
+  `Iterator`/`Iterable` implementation that (like most real code, since removal-during-iteration
+  is rarely needed) only overrides `hasNext()`/`next()` failed to compile with `"is not abstract
+  and does not override abstract method remove()"`. Fixed by making `TIterator.remove()` a
+  default method with the same throwing body the real JDK uses — existing TeaVM classlib
+  iterators that do override it (e.g. `ArrayList`'s) are unaffected, since overriding a default
+  method works exactly like overriding an abstract one.
+
 ## Rebuilding
 
 `../build.sh` calls `apply.sh` in this directory automatically, which:
@@ -311,7 +367,7 @@ change to `java.nio` itself that it wasn't attempted this round.
    reasoning as the OpenJDK source fetch documented in the main fork note).
 2. Copies the patched files in `classlib/` and `core/` over the corresponding paths in that
    checkout.
-3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched10` (bumped each
+3. Publishes `core` and `classlib` to `mavenLocal()` as version `0.13.1-patched12` (bumped each
    time the patch set changes, since Gradle/mavenLocal can otherwise serve a stale cached
    artifact for a version string it's already seen).
 

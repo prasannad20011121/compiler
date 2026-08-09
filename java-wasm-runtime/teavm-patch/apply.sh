@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Clones TeaVM at the 0.13.1 tag, overlays the patched classlib+core files in this directory,
-# and publishes core+classlib to mavenLocal as version 0.13.1-patched10. See README.md in
+# and publishes core+classlib to mavenLocal as version 0.13.1-patched12. See README.md in
 # this directory for what's patched and why. Called automatically by ../build.sh.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src_cache="$script_dir/teavm-src-cache"
-patched_version="0.13.1-patched10"
+patched_version="0.13.1-patched12"
 
 if [ ! -d "$src_cache" ] || [ -z "$(ls -A "$src_cache" 2>/dev/null)" ]; then
   echo "  Fetching konsoletyper/teavm @ 0.13.1 (first run only, ~400 MB)..."
@@ -49,6 +49,16 @@ cp "$script_dir/classlib/java/util/TScanner.java" \
   "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TScanner.java"
 cp "$script_dir/classlib/java/util/TInputMismatchException.java" \
   "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TInputMismatchException.java"
+cp "$script_dir/classlib/java/lang/TInteger.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/lang/TInteger.java"
+cp "$script_dir/classlib/java/lang/TLong.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/lang/TLong.java"
+cp "$script_dir/classlib/java/lang/TDouble.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/lang/TDouble.java"
+cp "$script_dir/classlib/java/lang/TFloat.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/lang/TFloat.java"
+cp "$script_dir/classlib/java/util/TIterator.java" \
+  "$src_cache/classlib/src/main/java/org/teavm/classlib/java/util/TIterator.java"
 
 echo "  Publishing patched core+classlib to mavenLocal as $patched_version..."
 (
