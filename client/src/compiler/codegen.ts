@@ -257,6 +257,7 @@ export class CodeGenerator {
     this.blockDepth = 1; // inside the synthetic exit block
     this.exitBlockDepth = 1; // matches the breakDepth/continueDepth convention: recorded post-increment
     bodyFb.block(retSlot ? valType(retSlot) : ValType.void);
+    if (fn.isCtor && fn.memberInits) this.emitMemberInits(fn.memberInits);
     this.compileStmt(fn.body);
     // Non-void functions must produce a value for the block; if control falls off the end without
     // an explicit `return` (technically UB in C), trap rather than fail WASM validation. Void
@@ -294,6 +295,15 @@ export class CodeGenerator {
   }
 
   private emitStoreParamIntoSlot(paramIndex: number, type: CType, offset: number): void {
+    if (type.kind === 'struct' || type.kind === 'union') {
+      // Struct/union params are passed by address (the caller already produced a pointer to its
+      // own copy — see how struct-typed expressions evaluate to their address). Copy those bytes
+      // into this function's own local slot, giving true by-value semantics: mutating the
+      // parameter here must not be visible to the caller.
+      this.fb.localGet(paramIndex);
+      this.emitCopyBytesFromStackAddr(offset, type.size);
+      return;
+    }
     this.emitAddrOfSlot(offset);
     this.fb.localGet(paramIndex);
     this.emitStore(type, 0);
@@ -420,14 +430,22 @@ export class CodeGenerator {
         this.breakStack.push({ breakDepth: this.blockDepth });
         this.fb.loop(ValType.void);
         this.blockDepth++;
-        this.loopStack.push({ continueDepth: this.blockDepth });
         if (s.cond) {
           const cond = this.compileExpr(s.cond)!;
           this.coerceToBool(cond);
           this.fb.op(Op.i32_eqz);
           this.fb.brIf(this.blockDepth - this.breakStack[this.breakStack.length - 1].breakDepth);
         }
+        // The body is wrapped in its own block so `continue` can target *this*, not the loop
+        // construct: branching to the loop itself jumps back to the condition check, skipping
+        // the step below — wrong for `for` (unlike while/do-while, which have no separate step).
+        this.fb.block(ValType.void);
+        this.blockDepth++;
+        this.loopStack.push({ continueDepth: this.blockDepth });
         this.compileStmt(s.body);
+        this.blockDepth--;
+        this.fb.end();
+        this.loopStack.pop();
         if (s.step) {
           const t = this.compileExpr(s.step);
           if (t) this.fb.op(Op.drop);
@@ -437,7 +455,6 @@ export class CodeGenerator {
         this.fb.end();
         this.blockDepth--;
         this.fb.end();
-        this.loopStack.pop();
         this.breakStack.pop();
         this.popScope();
         return;
@@ -564,6 +581,37 @@ export class CodeGenerator {
     this.fb.op(slot === 'i64' ? Op.i64_eq : Op.i32_eq);
   }
 
+  /** Resolves a constructor's member-initializer list now that the enclosing class's field types are fully known (unlike at parse time — see parser.ts). Each entry either calls the field's own constructor (class-typed field) or is a plain `this->field = arg;` assignment (scalar field, exactly one arg). */
+  private emitMemberInits(inits: NonNullable<FunctionDecl['memberInits']>): void {
+    const classType = this.currentClassType();
+    if (!classType) return;
+    for (const { field: fieldName, args, pos } of inits) {
+      const field = classType.fields?.find((f) => f.name === fieldName);
+      if (!field) throw new CodegenError(`no member named '${fieldName}' in ${typeName(classType)}`, pos);
+      const fieldCtor = (field.type.kind === 'struct' || field.type.kind === 'union') && field.type.tag
+        ? field.type.methods?.find((mm) => mm.name === field.type.tag)
+        : undefined;
+      if (fieldCtor) {
+        const g = this.globals.get(fieldCtor.mangledName)!;
+        const target: Expr = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: fieldName, arrow: true, pos };
+        this.emitLvalueAddr(target); // &this->field
+        for (let i = 0; i < args.length; i++) {
+          const a = this.compileExpr(args[i])!;
+          this.convert(a.type, g.type.params![i + 1]);
+        }
+        this.fb.call(g.funcIndex!);
+        continue;
+      }
+      if (args.length !== 1) {
+        throw new CodegenError(`member-initializer for scalar field '${fieldName}' must have exactly one argument`, pos);
+      }
+      const target: Expr = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: fieldName, arrow: true, pos };
+      const assign: Expr = { kind: 'Assign', op: '=', target, value: args[0], pos };
+      const t = this.compileExpr(assign);
+      if (t) this.fb.op(Op.drop);
+    }
+  }
+
   private compileLocalVarDecl(d: VarDecl): void {
     if (d.isExtern) return; // reference to a global; no local slot
     const off = this.allocLocal(d.name, d.type);
@@ -607,10 +655,43 @@ export class CodeGenerator {
       }
       return;
     }
+    if (type.kind === 'struct' || type.kind === 'union') {
+      // Copy-initialize from another struct-valued expression (a variable, a function call
+      // returning a struct, a dereferenced pointer, ...). Struct-typed expressions always
+      // evaluate to an address (see emitLoad's aggregate case), so `compileExpr` here leaves the
+      // source address on the stack; copy its bytes into this slot immediately, before anything
+      // else can reuse that memory (notably: if the source was a just-returned function's local,
+      // its stack frame is already freed, but not yet overwritten by a subsequent call).
+      const t = this.compileExpr(init)!;
+      this.emitCopyBytesFromStackAddr(offset, t.type.size);
+      return;
+    }
     this.emitAddrOfSlot(offset);
     const t = this.compileExpr(init)!;
     this.convert(t.type, type);
     this.emitStore(type, 0);
+  }
+
+  /** Consumes a source address left on top of the WASM stack and copies `size` bytes from it into the local slot at `destOffset`. */
+  private emitCopyBytesFromStackAddr(destOffset: number, size: number): void {
+    const srcScratch = this.acquireScratch('i32');
+    this.fb.localSet(srcScratch);
+    let off = 0;
+    while (off + 4 <= size) {
+      this.emitAddrOfSlot(destOffset + off);
+      this.fb.localGet(srcScratch).i32Const(off).op(Op.i32_add);
+      this.fb.mem(Op.i32_load, 2, 0);
+      this.fb.mem(Op.i32_store, 2, 0);
+      off += 4;
+    }
+    while (off < size) {
+      this.emitAddrOfSlot(destOffset + off);
+      this.fb.localGet(srcScratch).i32Const(off).op(Op.i32_add);
+      this.fb.mem(Op.i32_load8_u, 0, 0);
+      this.fb.mem(Op.i32_store8, 0, 0);
+      off += 1;
+    }
+    this.releaseScratch('i32', srcScratch);
   }
 
   private emitAggregateInit(type: CType, offset: number, items: Expr[]): void {

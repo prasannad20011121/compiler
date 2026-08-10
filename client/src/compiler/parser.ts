@@ -159,12 +159,23 @@ export class Parser {
     }
 
     // One or more comma-separated declarators, each with optional initializer.
+    // A function-typed declarator with no body here is a prototype (`int f(int);`) — still a
+    // FunctionDecl (body: null), not a VarDecl, so cross-file calls can resolve against it.
     const out: TopDecl[] = [];
     let cur: { name: string | null; type: CType } | null = first;
     while (cur) {
+      if (!cur.name) throw new ParseError('declarator requires a name', this.cur());
+      if (cur.type.kind === 'function') {
+        out.push({
+          kind: 'FunctionDecl', name: cur.name, type: cur.type, paramNames: cur.type.paramNames ?? [],
+          body: null, isStatic: spec.isStatic, pos: this.pos_(),
+        });
+        if (!this.eatPunct(',')) break;
+        cur = this.parseDeclarator(spec.type);
+        continue;
+      }
       let init: Expr | null = null;
       if (this.eatPunct('=')) init = this.parseInitializer();
-      if (!cur.name) throw new ParseError('declarator requires a name', this.cur());
       out.push({
         kind: 'VarDecl',
         name: cur.name,
@@ -378,11 +389,12 @@ export class Parser {
     const fullNames = ['this', ...names];
     const type = functionType(fullParams, returnType, false, fullNames);
 
-    // Member-initializer list (`: field(expr), field2(expr2)`): translated into plain
-    // `this->field = expr;` assignments prepended to the constructor body. Only the common
-    // single-expression-per-member form is supported — no base-class delegation (no inheritance)
-    // and no aggregate/brace-init member expressions.
-    const initStmts: Stmt[] = [];
+    // Member-initializer list (`: field(args...), field2(args...)`). Resolved at codegen time
+    // (not here) because whether `field(args)` means "call field's own constructor" or "assign
+    // this single value" depends on field's type, which isn't fully known until the enclosing
+    // class's body finishes parsing — see CodeGenerator.emitMemberInits. No base-class
+    // delegation (no inheritance) and no aggregate/brace-init member expressions.
+    const memberInits: { field: string; args: Expr[]; pos: Pos }[] = [];
     if (this.isPunct(':')) {
       this.advance();
       do {
@@ -391,23 +403,25 @@ export class Parser {
         const open = this.isPunct('(') ? '(' : this.isPunct('{') ? '{' : null;
         if (!open) throw new ParseError('expected member-initializer arguments', this.cur());
         this.advance();
-        const value = this.parseAssignment();
+        const args: Expr[] = [];
+        if (!this.isPunct(open === '(' ? ')' : '}')) {
+          args.push(this.parseAssignment());
+          while (this.eatPunct(',')) args.push(this.parseAssignment());
+        }
         this.expectPunct(open === '(' ? ')' : '}');
-        const target: Expr = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: fieldName, arrow: true, pos };
-        initStmts.push({ kind: 'ExprStmt', expr: { kind: 'Assign', op: '=', target, value, pos }, pos });
+        memberInits.push({ field: fieldName, args, pos });
       } while (this.eatPunct(','));
     }
 
     let body = null;
     if (this.isPunct('{')) {
-      const parsed = this.parseCompound();
-      body = parsed.kind === 'Compound' ? { ...parsed, body: [...initStmts, ...parsed.body] } : parsed;
+      body = this.parseCompound();
     } else {
       this.expectPunct(';');
     }
     const fn: FunctionDecl = {
       kind: 'FunctionDecl', name: mangled, type, paramNames: fullNames, body,
-      isStatic: false, className, isCtor, isDtor, pos: this.pos_(),
+      isStatic: false, className, isCtor, isDtor, memberInits, pos: this.pos_(),
     };
     this.pendingMethodDecls.push(fn);
     (classType.methods ??= []).push({ name: methodName, mangledName: mangled, type });

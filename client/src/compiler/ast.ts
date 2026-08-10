@@ -77,6 +77,8 @@ export interface FunctionDecl {
   isVirtual?: boolean;
   isCtor?: boolean;
   isDtor?: boolean;
+  /** Member-initializer list (`: field(args...)`), resolved at codegen time once field types are fully known — a field's own constructor is called when its type has one, else the (single) arg is a plain assignment. */
+  memberInits?: { field: string; args: Expr[]; pos: Pos }[];
   pos: Pos;
 }
 
