@@ -75,6 +75,18 @@ constructor get a synthesized one purely to stamp the vtable pointer.
 Multiple inheritance parses only the first base in the list (documented
 gap, see below).
 
+**Operator overloading**: `T operator+(U rhs)` (and `-`, `*`, `/`, `==`,
+`!=`, `<`, `>`, `<=`, `>=`, unary `-`/`!`, and `operator[]`) as member
+functions — `a + b` rewrites to `a.operator+(b)` at codegen time whenever
+`a`'s type has a matching method, reusing the same method-call machinery
+everything else goes through (so it works through inheritance, chains
+(`a + b - c`), and `operator[]` returning `int&` gives real mutable
+indexing via the reference machinery). Still one function per operator per
+class — real C++'s operator overloading-via-overload-resolution (e.g.
+distinct `operator+` for different right-hand-side types) doesn't apply.
+No `operator()`, `operator=`, compound-assignment operators, or
+conversion operators — see below.
+
 ## Known gaps (by design, not oversight)
 
 These are documented scope cuts, not bugs — each would be a substantial
@@ -92,8 +104,10 @@ feature in its own right:
   slot, shifting the inherited base fields by 4 bytes within the derived
   layout). Harmless unless something casts back to a `Base*` and reads a
   field through it in that specific scenario.
-- **No operator overloading** — so no `std::cout <<` / iostream. Use
-  `printf`/`scanf` (fully supported) in C++ files too.
+- **No `operator()`, `operator=`, compound-assignment operators
+  (`+=` etc.), or conversion operators**, and no free-function operator
+  overloads (`operator+(A, B)` outside a class) — so no `std::cout <<` /
+  iostream either. Use `printf`/`scanf` (fully supported) in C++ files too.
 - **No rvalue references** (`T&&`) — only ordinary lvalue references.
 - **No templates, exceptions, or namespaces** beyond parsing-and-ignoring.
 - **No function/method overloading** — one function per name; a second
@@ -122,5 +136,7 @@ unit-style suites (lexer/parser/preprocessor/wasm/codegen/driver),
 algorithms, BSTs, backtracking, multi-file modules with shared headers,
 classes composing classes) — this is what's actually caught most of the
 real bugs during development, well beyond what hand-picked unit tests find.
-`tests/references-smoke.ts` and `tests/inheritance-smoke.ts` cover the C++
-reference and single-inheritance/virtual-function features specifically.
+`tests/references-smoke.ts`, `tests/inheritance-smoke.ts`, and
+`tests/operators-smoke.ts` cover the C++ reference,
+single-inheritance/virtual-function, and operator-overloading features
+specifically.

@@ -867,6 +867,11 @@ export class CodeGenerator {
         return result;
       }
       case 'Index': {
+        const baseT = this.inferType(e.base);
+        if (this.findIndexOperatorMethod(baseT)) {
+          const call = this.makeOperatorCall(e.base, 'operator[]', [e.index], e.pos);
+          return this.compileExpr(call)!;
+        }
         const { type } = this.emitLvalueAddr(e);
         this.emitLoad(type, 0);
         e.type = type;
@@ -1069,6 +1074,10 @@ export class CodeGenerator {
     }
     if (e.kind === 'Index') {
       const baseT = this.inferType(e.base);
+      if (this.findIndexOperatorMethod(baseT)) {
+        const call = this.makeOperatorCall(e.base, 'operator[]', [e.index], e.pos);
+        return this.emitLvalueAddr(call);
+      }
       const elem = baseT.kind === 'array' || baseT.kind === 'pointer' ? baseT.pointee! : (() => { throw new CodegenError('subscripted value is not an array or pointer', e.pos); })();
       this.emitPointerBase(e.base, baseT);
       const idx = this.compileExpr(e.index)!;
@@ -1091,6 +1100,17 @@ export class CodeGenerator {
       if (field.offset !== 0) this.fb.i32Const(field.offset).op(Op.i32_add);
       e.type = field.type;
       return { type: field.type };
+    }
+    // Fallback for a struct/union-valued expression with no lvalue case of its own above (e.g. an
+    // operator-overload result nested as the base of `.field`/`[i]`, like `(a + b).x`): every such
+    // expression already leaves its address on the stack as its "value" (see the aggregate rule in
+    // emitLoad), so evaluating it as an ordinary rvalue via compileExpr already produces the
+    // address this function is supposed to return.
+    const t = this.inferType(e);
+    if (t.kind === 'struct' || t.kind === 'union') {
+      this.compileExpr(e);
+      e.type = t;
+      return { type: t };
     }
     throw new CodegenError('expression is not assignable', e.pos);
   }
@@ -1128,12 +1148,20 @@ export class CodeGenerator {
         if (field) return field.type;
         throw new CodegenError(`use of undeclared identifier '${e.name}'`, e.pos);
       }
-      case 'Unary':
+      case 'Unary': {
         if (e.op === '*') return this.derefType(this.inferType(e.operand));
         if (e.op === '&') return pointerTo(this.inferType(e.operand));
-        return this.inferType(e.operand);
+        const t = this.inferType(e.operand);
+        const unaryOp = this.findUnaryOperatorMethod(e.op, t);
+        if (unaryOp) return this.unwrapRef(unaryOp.type.returns!);
+        return t;
+      }
       case 'Index': {
         const bt = this.inferType(e.base);
+        if (bt.kind === 'struct' || bt.kind === 'union') {
+          const method = bt.methods?.find((mm) => mm.name === 'operator[]');
+          if (method) return this.unwrapRef(method.type.returns!);
+        }
         return bt.pointee!;
       }
       case 'Member': {
@@ -1180,8 +1208,12 @@ export class CodeGenerator {
         if (calleeType.kind === 'pointer' && calleeType.pointee!.kind === 'function') return calleeType.pointee!.returns!;
         throw new CodegenError('called object is not a function or function pointer', e.pos);
       }
-      case 'Binary':
-        return this.binaryResultType(e.op, this.inferType(e.left), this.inferType(e.right));
+      case 'Binary': {
+        const lt = this.inferType(e.left);
+        const binOp = this.findBinaryOperatorMethod(e.op, lt);
+        if (binOp) return this.unwrapRef(binOp.type.returns!);
+        return this.binaryResultType(e.op, lt, this.inferType(e.right));
+      }
       case 'Assign':
         return this.inferType(e.target);
       case 'Cond':
@@ -1336,6 +1368,11 @@ export class CodeGenerator {
       e.type = type;
       return { type };
     }
+    const operandType = this.inferType(e.operand);
+    if (this.findUnaryOperatorMethod(e.op, operandType)) {
+      const call = this.makeOperatorCall(e.operand, `operator${e.op}`, [], e.pos);
+      return this.compileExpr(call)!;
+    }
     const t = this.compileExpr(e.operand)!;
     const slot = slotOf(t.type);
     switch (e.op) {
@@ -1380,6 +1417,34 @@ export class CodeGenerator {
     else this.fb.i32Const(1);
   }
 
+  // ---- operator overloading ----
+  // A user-defined `T operator+(U rhs)` (etc.) member is resolved purely by name (our "no
+  // overloading" rule applies here too: one `operator+` per class), matching real C++'s implicit
+  // rule that an operator naturally binds tighter than falling back to built-in arithmetic. `a op
+  // b` / `-a` / `!a` / `a[i]` rewrite into an ordinary method call (`a.operator+(b)`, etc.) and
+  // reuse all the normal method-call machinery — including virtual dispatch, reference-returning
+  // results, and struct-by-value returns — so nothing about calling one is special-cased beyond
+  // this rewrite.
+  private unwrapRef(t: CType): CType {
+    return t.isReference ? t.pointee! : t;
+  }
+  private findBinaryOperatorMethod(op: string, leftType: CType) {
+    if (leftType.kind !== 'struct' && leftType.kind !== 'union') return undefined;
+    return leftType.methods?.find((mm) => mm.name === `operator${op}` && mm.type.params!.length === 2);
+  }
+  private findUnaryOperatorMethod(op: string, operandType: CType) {
+    if (operandType.kind !== 'struct' && operandType.kind !== 'union') return undefined;
+    return operandType.methods?.find((mm) => mm.name === `operator${op}` && mm.type.params!.length === 1);
+  }
+  private findIndexOperatorMethod(baseType: CType) {
+    if (baseType.kind !== 'struct' && baseType.kind !== 'union') return undefined;
+    return baseType.methods?.find((mm) => mm.name === 'operator[]');
+  }
+  private makeOperatorCall(base: Expr, methodName: string, args: Expr[], pos: Expr['pos']): Extract<Expr, { kind: 'Call' }> {
+    const callee: Extract<Expr, { kind: 'Member' }> = { kind: 'Member', base, field: methodName, arrow: false, pos };
+    return { kind: 'Call', callee, args, pos };
+  }
+
   // ---- binary / arithmetic with usual arithmetic conversions ----
 
   private compileBinary(e: Extract<Expr, { kind: 'Binary' }>): { type: CType } {
@@ -1407,8 +1472,13 @@ export class CodeGenerator {
       return { type: Types.int };
     }
 
-    // Pointer arithmetic special cases.
     const lt = this.inferType(e.left);
+    if (this.findBinaryOperatorMethod(e.op, lt)) {
+      const call = this.makeOperatorCall(e.left, `operator${e.op}`, [e.right], e.pos);
+      return this.compileExpr(call)!;
+    }
+
+    // Pointer arithmetic special cases.
     const rt = this.inferType(e.right);
     if ((e.op === '+' || e.op === '-') && (isPointerType(lt) || lt.kind === 'array') && isArithmeticType(rt)) {
       const l = this.compileExpr(e.left)!;

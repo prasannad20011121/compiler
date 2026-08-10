@@ -565,7 +565,22 @@ export class Parser {
       return inner;
     }
     let name: string | null = null;
-    if (this.cur().kind === 'ident' && !TYPE_KEYWORDS.has(this.cur().text)) {
+    if (this.cpp && this.isKw('operator')) {
+      // Operator overloading (`Vector2D operator+(Vector2D o)`): named as "operator" + the
+      // symbol, resolved at codegen time by rewriting `a + b` into `a.operator+(b)` when `a`'s
+      // type has a matching method (see codegen's operatorBinaryCall/operatorUnaryCall/
+      // operatorIndexCall). Only single-punctuator operators plus `[]` are recognized — no
+      // `operator()`, compound-assignment, or conversion operators (documented gap).
+      this.advance();
+      if (this.eatPunct('[')) {
+        this.expectPunct(']');
+        name = 'operator[]';
+      } else if (this.cur().kind === 'punct') {
+        name = 'operator' + this.advance().text;
+      } else {
+        throw new ParseError('expected an operator symbol after \'operator\'', this.cur());
+      }
+    } else if (this.cur().kind === 'ident' && !TYPE_KEYWORDS.has(this.cur().text)) {
       name = this.advance().text;
     }
     type = this.parseTypeSuffix(type);
