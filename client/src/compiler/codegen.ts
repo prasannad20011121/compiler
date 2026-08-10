@@ -155,19 +155,34 @@ export class CodeGenerator {
   /** Serializes a compile-time-constant initializer expression to little-endian bytes for the data segment. Global initializers must be constant (no function calls, no reads of other runtime values) — this is a documented limitation vs. full C, which is otherwise rare in practice. */
   private constExprToBytes(type: CType, e: Expr): number[] {
     if (e.kind === 'InitList') {
-      const out: number[] = [];
       if (type.kind === 'array') {
         const elem = type.pointee!;
-        for (const item of e.items) out.push(...pad(this.constExprToBytes(elem, item), elem.size));
-        while (out.length < type.size) out.push(0);
+        const out: number[] = new Array(type.size).fill(0);
+        let idx = 0;
+        for (let i = 0; i < e.items.length; i++) {
+          const d = e.designators?.[i];
+          if (typeof d === 'number') idx = d;
+          const fb = this.constExprToBytes(elem, e.items[i]);
+          for (let j = 0; j < fb.length; j++) out[idx * elem.size + j] = fb[j];
+          idx++;
+        }
         return out;
       }
       if (type.kind === 'struct' || type.kind === 'union') {
         const bytes: number[] = new Array(type.size).fill(0);
-        for (let i = 0; i < e.items.length && i < type.fields!.length; i++) {
-          const f = type.fields![i];
+        let idx = 0;
+        for (let i = 0; i < e.items.length; i++) {
+          const d = e.designators?.[i];
+          if (typeof d === 'string') {
+            const fi = type.fields!.findIndex((f) => f.name === d);
+            if (fi < 0) throw new CodegenError(`no member named '${d}' in ${typeName(type)}`, e.pos);
+            idx = fi;
+          }
+          if (idx >= type.fields!.length) break;
+          const f = type.fields![idx];
           const fb = this.constExprToBytes(f.type, e.items[i]);
           for (let j = 0; j < fb.length; j++) bytes[f.offset + j] = fb[j];
+          idx++;
         }
         return bytes;
       }
@@ -735,7 +750,7 @@ export class CodeGenerator {
 
   private emitInitializer(type: CType, offset: number, init: Expr): void {
     if (init.kind === 'InitList') {
-      this.emitAggregateInit(type, offset, init.items);
+      this.emitAggregateInit(type, offset, init);
       return;
     }
     if (type.kind === 'array' && type.pointee!.kind === 'char' && init.kind === 'StringLit') {
@@ -786,15 +801,32 @@ export class CodeGenerator {
     this.releaseScratch('i32', srcScratch);
   }
 
-  private emitAggregateInit(type: CType, offset: number, items: Expr[]): void {
+  private emitAggregateInit(type: CType, offset: number, init: Extract<Expr, { kind: 'InitList' }>): void {
+    const items = init.items;
+    const designators = init.designators;
     if (type.kind === 'array') {
       const elem = type.pointee!;
-      for (let i = 0; i < items.length; i++) this.emitInitializer(elem, offset + i * elem.size, items[i]);
+      let idx = 0;
+      for (let i = 0; i < items.length; i++) {
+        const d = designators?.[i];
+        if (typeof d === 'number') idx = d;
+        this.emitInitializer(elem, offset + idx * elem.size, items[i]);
+        idx++;
+      }
       return;
     }
     if (type.kind === 'struct' || type.kind === 'union') {
-      for (let i = 0; i < items.length && i < type.fields!.length; i++) {
-        this.emitInitializer(type.fields![i].type, offset + type.fields![i].offset, items[i]);
+      let idx = 0;
+      for (let i = 0; i < items.length; i++) {
+        const d = designators?.[i];
+        if (typeof d === 'string') {
+          const fi = type.fields!.findIndex((f) => f.name === d);
+          if (fi < 0) throw new CodegenError(`no member named '${d}' in ${typeName(type)}`, init.pos);
+          idx = fi;
+        }
+        if (idx >= type.fields!.length) break;
+        this.emitInitializer(type.fields![idx].type, offset + type.fields![idx].offset, items[i]);
+        idx++;
       }
       return;
     }
@@ -899,8 +931,18 @@ export class CodeGenerator {
         e.type = Types.uint;
         return { type: Types.uint };
       }
-      case 'InitList':
-        throw new CodegenError('initializer list used outside of a declaration', e.pos);
+      case 'InitList': {
+        // A compound literal (`(Type){...}`, parsed with `.type` already set — see parseCast) is
+        // otherwise an ordinary initializer list, which only makes sense attached to a
+        // declaration; used bare it has no type to initialize.
+        if (!e.type) throw new CodegenError('initializer list used outside of a declaration', e.pos);
+        const litType = e.type;
+        const off = this.allocLocal(`__compound_lit${e.pos.line}_${Math.random()}`, litType);
+        this.emitInitializer(litType, off, e);
+        this.emitAddrOfSlot(off);
+        this.emitLoad(litType, 0);
+        return { type: litType };
+      }
       case 'TempObject': {
         const classType = e.targetType;
         // A stack-resident temporary: allocate a hidden frame slot, construct into it, and
@@ -1101,13 +1143,14 @@ export class CodeGenerator {
       e.type = field.type;
       return { type: field.type };
     }
-    // Fallback for a struct/union-valued expression with no lvalue case of its own above (e.g. an
-    // operator-overload result nested as the base of `.field`/`[i]`, like `(a + b).x`): every such
-    // expression already leaves its address on the stack as its "value" (see the aggregate rule in
-    // emitLoad), so evaluating it as an ordinary rvalue via compileExpr already produces the
-    // address this function is supposed to return.
+    // Fallback for an aggregate-valued expression with no lvalue case of its own above (e.g. an
+    // operator-overload result nested as the base of `.field`/`[i]`, like `(a + b).x`, or an
+    // array/struct compound literal, `(int[]){1,2,3}[0]`): every such expression already leaves
+    // its address on the stack as its "value" (see the aggregate rule in emitLoad), so evaluating
+    // it as an ordinary rvalue via compileExpr already produces the address this function is
+    // supposed to return.
     const t = this.inferType(e);
-    if (t.kind === 'struct' || t.kind === 'union') {
+    if (t.kind === 'struct' || t.kind === 'union' || t.kind === 'array') {
       this.compileExpr(e);
       e.type = t;
       return { type: t };
@@ -1896,11 +1939,6 @@ function leBytes(v: bigint, size: number): number[] {
     out.push(Number(x & 0xffn));
     x >>= 8n;
   }
-  return out;
-}
-function pad(bytes: number[], size: number): number[] {
-  const out = bytes.slice(0, size);
-  while (out.length < size) out.push(0);
   return out;
 }
 function bytesToNumber(type: CType, bytes: number[]): number {

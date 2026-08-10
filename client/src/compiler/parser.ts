@@ -233,7 +233,19 @@ export class Parser {
   private resolveIncompleteArraySize(type: CType, init: Expr | null): CType {
     if (type.kind !== 'array' || type.arrayLen !== null || !init) return type;
     if (init.kind === 'StringLit') return arrayOf(type.pointee!, new TextEncoder().encode(init.value).length + 1);
-    if (init.kind === 'InitList') return arrayOf(type.pointee!, init.items.length);
+    if (init.kind === 'InitList') {
+      if (!init.designators) return arrayOf(type.pointee!, init.items.length);
+      // With array designators (`{[3] = v, ...}`), the inferred length is one past the highest
+      // index reached — a plain (undesignated) item continues the sequence from the last one.
+      let idx = 0;
+      let maxLen = 0;
+      for (const d of init.designators) {
+        if (typeof d === 'number') idx = d;
+        maxLen = Math.max(maxLen, idx + 1);
+        idx++;
+      }
+      return arrayOf(type.pointee!, maxLen);
+    }
     return type;
   }
 
@@ -818,12 +830,30 @@ export class Parser {
     const pos = this.pos_();
     if (this.eatPunct('{')) {
       const items: Expr[] = [];
+      const designators: (string | number | null)[] = [];
+      let anyDesignator = false;
       while (!this.isPunct('}')) {
+        let designator: string | number | null = null;
+        if (this.isPunct('.')) {
+          // Designated initializer (`{.field = val, ...}`, C99).
+          this.advance();
+          designator = this.expectIdent();
+          this.expectPunct('=');
+          anyDesignator = true;
+        } else if (this.isPunct('[')) {
+          // Array designator (`{[idx] = val, ...}`, C99).
+          this.advance();
+          designator = Number(this.evalConstInt(this.parseConditional()));
+          this.expectPunct(']');
+          this.expectPunct('=');
+          anyDesignator = true;
+        }
         items.push(this.parseInitializer());
+        designators.push(designator);
         if (!this.eatPunct(',')) break;
       }
       this.expectPunct('}');
-      return { kind: 'InitList', items, pos };
+      return anyDesignator ? { kind: 'InitList', items, designators, pos } : { kind: 'InitList', items, pos };
     }
     return this.parseAssignment();
   }
@@ -906,9 +936,11 @@ export class Parser {
       if (this.isPunct(')')) {
         this.advance();
         if (this.isPunct('{')) {
-          // Compound literal `(Type){...}` — treat as an initializer list of that type.
+          // Compound literal `(Type){...}` — treat as an initializer list of that type, then
+          // allow postfix suffixes to chain off it just like any other primary expression
+          // (indexing, member access, calls: `(int[]){1,2,3}[0]`).
           const initList = this.parseInitializer();
-          return { ...initList, type: targetType } as Expr;
+          return this.parsePostfixSuffixes({ ...initList, type: targetType } as Expr);
         }
         const operand = this.parseCast();
         return { kind: 'Cast', targetType, operand, pos };
@@ -986,7 +1018,14 @@ export class Parser {
   }
 
   private parsePostfix(): Expr {
-    let e = this.parsePrimary();
+    return this.parsePostfixSuffixes(this.parsePrimary());
+  }
+
+  /** Applies `[]`/`()`/`.`/`->`/postfix-`++`/`--` suffixes to an already-parsed primary
+   * expression. Factored out so a compound literal (`(Type){...}`, parsed in parseCast — it
+   * isn't itself a "primary" since it starts with a parenthesized type-name) can still be
+   * indexed/called/member-accessed immediately, e.g. `(int[]){1,2,3}[0]`. */
+  private parsePostfixSuffixes(e: Expr): Expr {
     for (;;) {
       const pos = this.pos_();
       if (this.eatPunct('[')) {

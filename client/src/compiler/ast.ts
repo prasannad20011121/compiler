@@ -24,7 +24,10 @@ export type Expr =
   | { kind: 'Cast'; targetType: CType; operand: Expr; type?: CType; pos: Pos }
   | { kind: 'SizeofType'; targetType: CType; type?: CType; pos: Pos }
   | { kind: 'SizeofExpr'; operand: Expr; type?: CType; pos: Pos }
-  | { kind: 'InitList'; items: Expr[]; type?: CType; pos: Pos }
+  /** `designators[i]` is a field name (`.field = v`), an array index (`[i] = v`), or null (plain
+   * positional item) for `items[i]`. Present only when the initializer list uses at least one
+   * designator — plain lists (the overwhelming majority) carry no designators array at all. */
+  | { kind: 'InitList'; items: Expr[]; designators?: (string | number | null)[]; type?: CType; pos: Pos }
   // C++ additions (used once the C++ layer is enabled)
   | { kind: 'New'; targetType: CType; args: Expr[]; type?: CType; pos: Pos }
   | { kind: 'Delete'; operand: Expr; isArray: boolean; type?: CType; pos: Pos }

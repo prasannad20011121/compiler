@@ -50,6 +50,11 @@ a self-hosted libc subset (`runtime/libc.ts`): `string.h`, a bump allocator
 (`malloc`/`free`/`calloc`/`realloc` — `free` does not reclaim memory, which
 is fine for the short programs this IDE runs), and `printf`/`sprintf`/
 `scanf` with width/precision/padding flags and correct decimal rounding.
+Also **designated initializers** (`{.field = v}`, `{[i] = v}`, C99 — out
+of order, with array-length inference from the highest index reached) and
+**compound literals** (`(Type){...}`, usable anywhere an expression is,
+including chained straight into indexing/member-access/calls like
+`(int[]){1,2,3}[0]`).
 
 **C++**: classes/structs with fields and methods (implicit `this`,
 including calling one method from another without an explicit `this->`),
@@ -117,8 +122,7 @@ feature in its own right:
 - **No out-of-class method definitions** (`ClassName::method() { ... }`);
   methods must be defined inline in the class body.
 - **No `new T[n]`** (array-new) — only single-object `new`.
-- **Designated initializers**, **compound literals**, and **`goto`/labels**
-  are not implemented.
+- **`goto`/labels** are not implemented.
 - Global variable initializers must be compile-time constants (covers the
   vast majority of real code, but e.g. `int x = some_function();` at file
   scope isn't supported).
@@ -136,7 +140,7 @@ unit-style suites (lexer/parser/preprocessor/wasm/codegen/driver),
 algorithms, BSTs, backtracking, multi-file modules with shared headers,
 classes composing classes) — this is what's actually caught most of the
 real bugs during development, well beyond what hand-picked unit tests find.
-`tests/references-smoke.ts`, `tests/inheritance-smoke.ts`, and
-`tests/operators-smoke.ts` cover the C++ reference,
-single-inheritance/virtual-function, and operator-overloading features
-specifically.
+`tests/references-smoke.ts`, `tests/inheritance-smoke.ts`,
+`tests/operators-smoke.ts`, and `tests/designated-init-smoke.ts` cover the
+C++ reference, single-inheritance/virtual-function, operator-overloading,
+and C designated-initializer/compound-literal features specifically.
