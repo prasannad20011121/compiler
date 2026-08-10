@@ -50,6 +50,12 @@ const BUILTIN_HEADERS: Record<string, string> = {
 #define va_start(ap, last) __builtin_va_start(ap)
 #define va_end(ap) __builtin_va_end(ap)
 `,
+  // The math *functions* (sqrt/exp/log/sin/...) are resolved by name at codegen time like every
+  // other runtime function, with no textual declaration required — same as stdio.h/stdlib.h. The
+  // constants are the one thing that genuinely needs real macro text.
+  'math.h': `#define M_PI 3.14159265358979323846
+#define M_E 2.71828182845904523536
+`,
 };
 
 function normalizePath(p: string): string {

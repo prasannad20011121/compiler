@@ -74,6 +74,9 @@ export class CodeGenerator {
   private breakStack: { breakDepth: number }[] = [];
   private exitBlockDepth = 0;
   private currentFn!: FunctionDecl;
+  /** Set only while compiling a function that uses goto/labels (see compileGotoFunctionBody);
+   * null in every other function, which is the overwhelming majority. */
+  private currentGotoCtx: { labelIndex: Map<string, number>; stateOffset: number; dispatchDepth: number } | null = null;
 
   /** Registered before codegen so user code and runtime code can call each other regardless of definition order. */
   registerFunction(name: string, type: CType, isDefinition: boolean): number {
@@ -284,6 +287,7 @@ export class CodeGenerator {
     this.blockDepth = 0;
     this.loopStack = [];
     this.breakStack = [];
+    this.currentGotoCtx = null;
 
     const paramOffsets: number[] = [];
     const params = fn.type.params!;
@@ -311,7 +315,11 @@ export class CodeGenerator {
       if (classType?.hasVtable) this.emitVtablePtrStore(classType);
     }
     if (fn.isCtor && fn.memberInits) this.emitMemberInits(fn.memberInits);
-    this.compileStmt(fn.body);
+    if (fn.body.kind === 'Compound' && this.hasGotoOrLabel(fn.body)) {
+      this.compileGotoFunctionBody(fn.body);
+    } else {
+      this.compileStmt(fn.body);
+    }
     // Non-void functions must produce a value for the block; if control falls off the end without
     // an explicit `return` (technically UB in C), trap rather than fail WASM validation. Void
     // functions legitimately fall through with no value, so they must NOT get this safety net.
@@ -551,8 +559,22 @@ export class CodeGenerator {
       case 'Default':
         throw new CodegenError('case/default outside of a compiled switch', s.pos);
       case 'Label':
-      case 'Goto':
-        throw new CodegenError('goto/labels are not supported yet by this compiler', s.pos);
+        // Reaching this directly (rather than via compileGotoFunctionBody's chunk splitting,
+        // which strips top-level labels before ever calling compileStmt on them) means the label
+        // is nested inside a nested block — see assertNoLabelBelowTopLevel.
+        throw new CodegenError(`label '${s.name}' must be declared at the top level of the function body (nested goto targets are not supported)`, s.pos);
+      case 'Goto': {
+        const ctx = this.currentGotoCtx;
+        const idx = ctx?.labelIndex.get(s.name);
+        if (!ctx || idx === undefined) {
+          throw new CodegenError(`goto target label '${s.name}' not found (labels must be declared at the top level of the function body)`, s.pos);
+        }
+        this.emitAddrOfSlot(ctx.stateOffset);
+        this.fb.i32Const(idx);
+        this.emitStore(Types.int, 0);
+        this.fb.br(this.blockDepth - ctx.dispatchDepth);
+        return;
+      }
       default:
         throw new CodegenError(`unhandled statement kind '${(s as Stmt).kind}'`, (s as Stmt).pos);
     }
@@ -627,6 +649,130 @@ export class CodeGenerator {
     };
     visit(body);
     return out;
+  }
+
+  // ---- goto/labels ----
+  // Supported subset: every label a function uses must sit directly in the function body's top
+  // level (not nested inside an if/loop/switch) — a `goto`, by contrast, may appear anywhere,
+  // including deep inside nested loops (the classic "multi-level break to a cleanup label"
+  // pattern this is mainly for). This covers the overwhelming majority of real goto usage
+  // (early-exit/cleanup, retry loops, breaking out of nested loops) without needing a general
+  // relooper for arbitrary jumps into the middle of nested blocks.
+  //
+  // Lowering: the top-level statement list is split into chunks at each label. The whole thing is
+  // wrapped in one `loop`, containing one `block` per chunk, nested so chunk `j`'s block is j
+  // levels deeper than chunk 0's — branching out of block `j` lands exactly at the start of chunk
+  // `j` (nothing else follows a block's `end` until the next chunk's code). A dispatch check right
+  // after entering the innermost block reads a hidden `state` local and branches to the matching
+  // block; state 0 falls through with no branch at all (block 0 is innermost, so nothing to skip).
+  // `goto label` sets state to label's chunk index and `br`s back to the loop head, which re-runs
+  // the dispatch and lands on the right chunk — working the same whether the goto is textually
+  // before or after the label.
+
+  private hasGotoOrLabel(s: Stmt): boolean {
+    switch (s.kind) {
+      case 'Label':
+      case 'Goto':
+        return true;
+      case 'Compound':
+        return s.body.some((c) => this.hasGotoOrLabel(c));
+      case 'If':
+        return this.hasGotoOrLabel(s.then) || (s.else != null && this.hasGotoOrLabel(s.else));
+      case 'While':
+      case 'DoWhile':
+        return this.hasGotoOrLabel(s.body);
+      case 'For':
+        return (s.init != null && this.hasGotoOrLabel(s.init)) || this.hasGotoOrLabel(s.body);
+      case 'Switch':
+        return this.hasGotoOrLabel(s.body);
+      default:
+        return false;
+    }
+  }
+
+  private assertNoLabelBelowTopLevel(s: Stmt): void {
+    switch (s.kind) {
+      case 'Label':
+        throw new CodegenError(`label '${s.name}' must be declared at the top level of the function body (nested goto targets are not supported)`, s.pos);
+      case 'Compound':
+        for (const c of s.body) this.assertNoLabelBelowTopLevel(c);
+        return;
+      case 'If':
+        this.assertNoLabelBelowTopLevel(s.then);
+        if (s.else) this.assertNoLabelBelowTopLevel(s.else);
+        return;
+      case 'While':
+      case 'DoWhile':
+        this.assertNoLabelBelowTopLevel(s.body);
+        return;
+      case 'For':
+        if (s.init) this.assertNoLabelBelowTopLevel(s.init);
+        this.assertNoLabelBelowTopLevel(s.body);
+        return;
+      case 'Switch':
+        this.assertNoLabelBelowTopLevel(s.body);
+        return;
+      default:
+        return;
+    }
+  }
+
+  private compileGotoFunctionBody(body: Extract<Stmt, { kind: 'Compound' }>): void {
+    this.pushScope(); // matches the scope compileStmt's own Compound case would have pushed
+
+    const chunks: Stmt[][] = [[]];
+    const labelIndex = new Map<string, number>();
+    for (const s of body.body) {
+      if (s.kind === 'Label') {
+        labelIndex.set(s.name, chunks.length);
+        chunks.push([]);
+      } else {
+        this.assertNoLabelBelowTopLevel(s);
+        chunks[chunks.length - 1].push(s);
+      }
+    }
+    const k = chunks.length - 1; // number of labels found
+
+    const stateOffset = this.allocLocal(`__goto_state_${body.pos.line}`, Types.int);
+    this.emitAddrOfSlot(stateOffset);
+    this.fb.i32Const(0);
+    this.emitStore(Types.int, 0);
+
+    this.fb.loop(ValType.void);
+    this.blockDepth++;
+    const dispatchDepth = this.blockDepth;
+    const outerGotoCtx = this.currentGotoCtx;
+    this.currentGotoCtx = { labelIndex, stateOffset, dispatchDepth };
+
+    // Open k+1 nested blocks, outermost (chunk k) first, so block j's `end` is followed
+    // immediately by chunk j's code.
+    const blockStartDepth: number[] = new Array(k + 1);
+    for (let j = k; j >= 0; j--) {
+      this.fb.block(ValType.void);
+      this.blockDepth++;
+      blockStartDepth[j] = this.blockDepth;
+    }
+
+    const dispatchSiteDepth = this.blockDepth;
+    for (let j = k; j >= 1; j--) {
+      this.emitAddrOfSlot(stateOffset);
+      this.emitLoad(Types.int, 0);
+      this.fb.i32Const(j);
+      this.fb.op(Op.i32_eq);
+      this.fb.brIf(dispatchSiteDepth - blockStartDepth[j]);
+    }
+    // state 0 (the common case: no goto has run yet): no branch needed, straight fallthrough.
+
+    for (let j = 0; j <= k; j++) {
+      this.fb.end(); // closes block j, landing exactly at the start of chunk j
+      this.blockDepth--;
+      for (const stmt of chunks[j]) this.compileStmt(stmt);
+    }
+
+    this.fb.end(); // closes the loop; falling off here is normal completion, not a re-loop
+    this.blockDepth--;
+    this.currentGotoCtx = outerGotoCtx;
+    this.popScope();
   }
 
   private evalCaseConst(e: Expr, targetType: CType): bigint {
@@ -1826,6 +1972,15 @@ export class CodeGenerator {
       this.fb.op(Op.unreachable);
       return null;
     }
+    if (name === '__builtin_sqrt' || name === '__builtin_fabs') {
+      // Native WASM instructions (math.h's sqrt/fabs are thin C wrappers around these — see
+      // runtime/libc.ts — rather than software implementations, unlike the transcendental
+      // functions below which have no WASM opcode and are real algorithms in C).
+      const t = this.compileExpr(args[0])!;
+      this.convert(t.type, Types.double);
+      this.fb.op(name === '__builtin_sqrt' ? Op.f64_sqrt : Op.f64_abs);
+      return { type: Types.double };
+    }
     return undefined;
   }
 
@@ -1918,6 +2073,8 @@ const BUILTIN_RETURN_TYPES: Record<string, CType> = {
   __builtin_heap_base: Types.uint,
   __builtin_memory_grow: Types.int,
   __builtin_memory_size: Types.int,
+  __builtin_sqrt: Types.double,
+  __builtin_fabs: Types.double,
 };
 
 function isAggregateAssignTarget(t: CType): boolean {

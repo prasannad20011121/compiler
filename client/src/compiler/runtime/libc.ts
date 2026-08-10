@@ -6,7 +6,8 @@
  * `__builtin_write`/`__builtin_read`/`__builtin_exit` are ordinary imported
  * host functions (registered by the driver, not special-cased in codegen).
  * `__builtin_heap_base`/`__builtin_memory_grow`/`__builtin_memory_size`/
- * `__builtin_trap`/`__builtin_va_*` are true codegen intrinsics.
+ * `__builtin_trap`/`__builtin_va_*`/`__builtin_sqrt`/`__builtin_fabs` are
+ * true codegen intrinsics (the last two are thin wrappers in math.h below).
  *
  * Scope, by design: a bump allocator (free() does not reclaim memory — fine
  * for the short-lived programs this IDE runs), and a practical printf/scanf
@@ -453,5 +454,107 @@ int scanf(const char *fmt, ...) {
   }
   va_end(ap);
   return count;
+}
+
+/* ---------------- math.h ----------------
+ * sqrt/fabs are thin wrappers around native WASM instructions (see codegen's
+ * __builtin_sqrt/__builtin_fabs). Everything else has no WASM opcode to lean on, so it's a real
+ * (if modest-precision — good to about 1e-12, plenty for this IDE's programs) numerical
+ * implementation: range reduction + Taylor series for exp/sin/cos, Newton's method on top of our
+ * own exp() for log, and an exact fast-power path for integer exponents in pow(). */
+
+double sqrt(double x) { return __builtin_sqrt(x); }
+double fabs(double x) { return __builtin_fabs(x); }
+
+double exp(double x) {
+  int k = 0;
+  double r = x;
+  while (r > 0.5 || r < -0.5) { r = r / 2.0; k = k + 1; }
+  double term = 1.0;
+  double sum = 1.0;
+  int n = 1;
+  while (n < 25) {
+    term = term * r / n;
+    sum = sum + term;
+    n = n + 1;
+  }
+  while (k > 0) { sum = sum * sum; k = k - 1; }
+  return sum;
+}
+
+double log(double x) {
+  if (x <= 0.0) return -1.0 / 0.0;
+  int k = 0;
+  double m = x;
+  while (m >= 2.0) { m = m / 2.0; k = k + 1; }
+  while (m < 1.0) { m = m * 2.0; k = k - 1; }
+  double y = 0.0;
+  int i = 0;
+  while (i < 12) {
+    y = y - 1.0 + m / exp(y);
+    i = i + 1;
+  }
+  return y + (double)k * 0.6931471805599453;
+}
+
+double pow(double x, double y) {
+  long n = (long)y;
+  if ((double)n == y) {
+    int neg = n < 0;
+    if (neg) n = -n;
+    double result = 1.0;
+    double base = x;
+    while (n > 0) {
+      if (n % 2 == 1) result = result * base;
+      base = base * base;
+      n = n / 2;
+    }
+    return neg ? 1.0 / result : result;
+  }
+  return exp(y * log(x));
+}
+
+double sin(double x) {
+  while (x > 3.14159265358979323846) x = x - 6.28318530717958647692;
+  while (x < -3.14159265358979323846) x = x + 6.28318530717958647692;
+  double term = x;
+  double sum = x;
+  double x2 = x * x;
+  int n = 1;
+  while (n < 15) {
+    term = term * (-x2) / (double)((2 * n) * (2 * n + 1));
+    sum = sum + term;
+    n = n + 1;
+  }
+  return sum;
+}
+
+double cos(double x) {
+  while (x > 3.14159265358979323846) x = x - 6.28318530717958647692;
+  while (x < -3.14159265358979323846) x = x + 6.28318530717958647692;
+  double term = 1.0;
+  double sum = 1.0;
+  double x2 = x * x;
+  int n = 1;
+  while (n < 15) {
+    term = term * (-x2) / (double)((2 * n - 1) * (2 * n));
+    sum = sum + term;
+    n = n + 1;
+  }
+  return sum;
+}
+
+double tan(double x) { return sin(x) / cos(x); }
+
+double floor(double x) {
+  double i = (double)(long)x;
+  if (x < 0.0 && i != x) return i - 1.0;
+  return i;
+}
+
+double ceil(double x) {
+  double i = (double)(long)x;
+  if (x > 0.0 && i != x) return i + 1.0;
+  return i;
 }
 `;

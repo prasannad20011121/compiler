@@ -48,13 +48,24 @@ functions (`#include <stdarg.h>` — `va_list`/`va_start`/`va_arg`/`va_end`
 all work, alongside the `printf`-style calling convention they share), and
 a self-hosted libc subset (`runtime/libc.ts`): `string.h`, a bump allocator
 (`malloc`/`free`/`calloc`/`realloc` — `free` does not reclaim memory, which
-is fine for the short programs this IDE runs), and `printf`/`sprintf`/
-`scanf` with width/precision/padding flags and correct decimal rounding.
-Also **designated initializers** (`{.field = v}`, `{[i] = v}`, C99 — out
-of order, with array-length inference from the highest index reached) and
-**compound literals** (`(Type){...}`, usable anywhere an expression is,
-including chained straight into indexing/member-access/calls like
-`(int[]){1,2,3}[0]`).
+is fine for the short programs this IDE runs), `printf`/`sprintf`/`scanf`
+with width/precision/padding flags and correct decimal rounding, and a
+real `math.h` (`sqrt`/`fabs` compile to native WASM instructions;
+`exp`/`log`/`sin`/`cos`/`tan`/`pow`/`floor`/`ceil`/`M_PI`/`M_E` are actual
+numerical implementations — range reduction + Taylor series, Newton's
+method for `log` — good to about 1e-12, not bit-for-bit libm but plenty
+for this IDE's programs). Also **designated initializers** (`{.field = v}`,
+`{[i] = v}`, C99 — out of order, with array-length inference from the
+highest index reached) and **compound literals** (`(Type){...}`, usable
+anywhere an expression is, including chained straight into
+indexing/member-access/calls like `(int[]){1,2,3}[0]`), and **`goto`/
+labels**: any function using them gets its top-level statement list
+lowered into a `loop` + one nested `block` per label with a small dispatch
+check, so labels declared at the top level of a function body support
+both forward and backward `goto` (including `goto` from deep inside
+nested loops — the common "break out of nested loops to a cleanup label"
+pattern) — see the gaps list for the one restriction (labels must be
+top-level; a `goto` itself can originate from anywhere).
 
 **C++**: classes/structs with fields and methods (implicit `this`,
 including calling one method from another without an explicit `this->`),
@@ -122,7 +133,11 @@ feature in its own right:
 - **No out-of-class method definitions** (`ClassName::method() { ... }`);
   methods must be defined inline in the class body.
 - **No `new T[n]`** (array-new) — only single-object `new`.
-- **`goto`/labels** are not implemented.
+- **`goto` labels must be declared at the top level of the function body**
+  (not nested inside an `if`/loop/`switch`) — covers early-exit/cleanup,
+  retry loops, and breaking out of nested loops (by far the most common
+  real-world uses), but not jumping into the middle of an arbitrarily
+  nested block. The `goto` itself has no such restriction.
 - Global variable initializers must be compile-time constants (covers the
   vast majority of real code, but e.g. `int x = some_function();` at file
   scope isn't supported).
@@ -141,6 +156,8 @@ algorithms, BSTs, backtracking, multi-file modules with shared headers,
 classes composing classes) — this is what's actually caught most of the
 real bugs during development, well beyond what hand-picked unit tests find.
 `tests/references-smoke.ts`, `tests/inheritance-smoke.ts`,
-`tests/operators-smoke.ts`, and `tests/designated-init-smoke.ts` cover the
-C++ reference, single-inheritance/virtual-function, operator-overloading,
-and C designated-initializer/compound-literal features specifically.
+`tests/operators-smoke.ts`, `tests/designated-init-smoke.ts`, and
+`tests/mathgoto-smoke.ts` cover the C++ reference,
+single-inheritance/virtual-function, and operator-overloading features,
+and the C designated-initializer/compound-literal and math.h/goto/label
+features, respectively.
