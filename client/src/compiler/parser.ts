@@ -330,16 +330,28 @@ export class Parser {
       this.typedefScopes[0].add(tag);
       this.registerTypedef(tag, placeholder);
     }
-    // (Single/multiple inheritance is not supported: `class Derived : public Base` parses the
-    // base-clause and ignores it, so simple non-inheriting classes elsewhere in the same file
-    // still compile — documented gap.)
+    // Single inheritance only: the first base in the list is used, the rest (multiple
+    // inheritance) are parsed and discarded — documented gap.
+    let baseType: CType | undefined;
     if (this.isPunct(':')) {
       this.advance();
       do {
         while (this.isKw('public') || this.isKw('private') || this.isKw('protected') || this.isKw('virtual')) this.advance();
-        this.expectIdent();
+        const baseName = this.expectIdent();
+        if (!baseType) {
+          baseType = this.typedefTable.get(baseName) ?? this.tags.get(`struct ${baseName}`) ?? this.tags.get(`class ${baseName}`);
+        }
       } while (this.eatPunct(','));
     }
+    if (baseType) {
+      placeholder.baseType = baseType;
+      // Flatten: copy the base's (already-flattened) methods in as a starting point so plain name
+      // lookup finds inherited methods with no base-chain walk; own declarations below override
+      // matching entries in place (preserving vtable slot order) or append new ones.
+      placeholder.methods = (baseType.methods ?? []).map((m) => ({ ...m }));
+      if (baseType.dtorName) placeholder.dtorName = baseType.dtorName;
+    }
+    let anyCtor = false;
     if (this.eatPunct('{')) {
       const fields: { name: string; type: CType }[] = [];
       while (!this.isPunct('}')) {
@@ -348,15 +360,21 @@ export class Parser {
           this.advance();
           continue;
         }
+        let memberIsVirtual = false;
+        if (this.cpp && this.isKw('virtual')) {
+          memberIsVirtual = true;
+          this.advance();
+        }
         if (this.cpp && this.isPunct('~') && tag && this.isKw(tag, 1)) {
           this.advance();
           const methodName = '~' + this.advance().text;
-          this.parseMemberFunction(placeholder, tag, methodName, Types.void, false, true);
+          this.parseMemberFunction(placeholder, tag, methodName, Types.void, false, true, memberIsVirtual);
           continue;
         }
         if (this.cpp && tag && this.isKw(tag) && this.peek(1).kind === 'punct' && this.peek(1).text === '(') {
           const methodName = this.advance().text;
-          this.parseMemberFunction(placeholder, tag, methodName, Types.void, true, false);
+          anyCtor = true;
+          this.parseMemberFunction(placeholder, tag, methodName, Types.void, true, false, false);
           continue;
         }
         const spec = this.parseDeclSpecifiers();
@@ -367,7 +385,7 @@ export class Parser {
           if (!d.name) throw new ParseError('expected member name', this.cur());
           if (this.cpp && d.type.kind === 'function' && (this.isPunct('{') || this.isPunct(';'))) {
             // parseMemberFunctionRest already consumes the trailing ';' (prototype) or '{...}' (body) — no comma-list continuation applies to methods.
-            this.parseMemberFunctionRest(placeholder, tag ?? '<anon>', d.name, d.type);
+            this.parseMemberFunctionRest(placeholder, tag ?? '<anon>', d.name, d.type, memberIsVirtual);
             sawMethod = true;
             break;
           }
@@ -380,8 +398,25 @@ export class Parser {
         if (!sawMethod) this.expectPunct(';');
       }
       this.expectPunct('}');
-      const completed = makeStruct(tag ?? `<anon@${this.pos}>`, fields, isUnion);
+      const hasVtable = !!(placeholder.methods?.some((m) => m.isVirtual) || baseType?.hasVtable);
+      const needsOwnVptr = hasVtable && !baseType?.hasVtable;
+      const completed = makeStruct(tag ?? `<anon@${this.pos}>`, fields, isUnion, baseType, needsOwnVptr);
       Object.assign(placeholder, completed);
+      placeholder.hasVtable = hasVtable;
+      placeholder.baseFieldOffset = needsOwnVptr ? 4 : 0;
+      // A class with a vtable but no user-declared constructor still needs one to run, purely to
+      // stamp the vtable pointer into new objects — otherwise it stays uninitialized garbage and
+      // virtual calls on it are undefined behavior.
+      if (hasVtable && !anyCtor && tag) {
+        const mangled = `${tag}__${tag}`;
+        const fn: FunctionDecl = {
+          kind: 'FunctionDecl', name: mangled, type: functionType([pointerTo(placeholder)], Types.void, false, ['this']),
+          paramNames: ['this'], body: { kind: 'Compound', body: [], pos: this.pos_() },
+          isStatic: false, className: tag, isCtor: true, memberInits: [], pos: this.pos_(),
+        };
+        this.pendingMethodDecls.push(fn);
+        placeholder.ctorName = mangled;
+      }
       void isClass;
       return placeholder;
     }
@@ -389,8 +424,24 @@ export class Parser {
     return placeholder;
   }
 
+  /** Adds or overrides a method entry on a class's flattened method list. An override (same name
+   * as an inherited entry) replaces it in place — preserving vtable slot order — and is virtual
+   * if either the base's entry or this declaration says so (matching real C++: overriding a
+   * virtual method is implicitly virtual even without repeating the keyword). */
+  private registerMethod(classType: CType, name: string, mangledName: string, type: CType, isVirtual: boolean): void {
+    const list = (classType.methods ??= []);
+    const existing = list.find((m) => m.name === name);
+    if (existing) {
+      existing.mangledName = mangledName;
+      existing.type = type;
+      existing.isVirtual = existing.isVirtual || isVirtual;
+    } else {
+      list.push({ name, mangledName, type, isVirtual });
+    }
+  }
+
   /** Parses a constructor (`Foo(...)`) or destructor (`~Foo()`) body/prototype. */
-  private parseMemberFunction(classType: CType, className: string, methodName: string, returnType: CType, isCtor: boolean, isDtor: boolean): void {
+  private parseMemberFunction(classType: CType, className: string, methodName: string, returnType: CType, isCtor: boolean, isDtor: boolean, isVirtual: boolean): void {
     this.expectPunct('(');
     const { params, names } = this.parseParamList();
     this.expectPunct(')');
@@ -432,16 +483,16 @@ export class Parser {
     }
     const fn: FunctionDecl = {
       kind: 'FunctionDecl', name: mangled, type, paramNames: fullNames, body,
-      isStatic: false, className, isCtor, isDtor, memberInits, pos: this.pos_(),
+      isStatic: false, className, isCtor, isDtor, isVirtual, memberInits, pos: this.pos_(),
     };
     this.pendingMethodDecls.push(fn);
-    (classType.methods ??= []).push({ name: methodName, mangledName: mangled, type });
+    this.registerMethod(classType, methodName, mangled, type, isVirtual);
     if (isCtor && params.length === 0) classType.ctorName = mangled;
     if (isDtor) classType.dtorName = mangled;
   }
 
   /** Parses the remainder of an ordinary method whose return type + name + params were already consumed as a normal declarator. */
-  private parseMemberFunctionRest(classType: CType, className: string, methodName: string, funcType: CType): void {
+  private parseMemberFunctionRest(classType: CType, className: string, methodName: string, funcType: CType, isVirtual: boolean): void {
     const mangled = `${className}__${methodName}`;
     const fullParams = [pointerTo(classType), ...funcType.params!];
     const fullNames = ['this', ...(funcType.paramNames ?? [])];
@@ -451,10 +502,10 @@ export class Parser {
     else this.expectPunct(';');
     const fn: FunctionDecl = {
       kind: 'FunctionDecl', name: mangled, type, paramNames: fullNames, body,
-      isStatic: false, className, pos: this.pos_(),
+      isStatic: false, className, isVirtual, pos: this.pos_(),
     };
     this.pendingMethodDecls.push(fn);
-    (classType.methods ??= []).push({ name: methodName, mangledName: mangled, type });
+    this.registerMethod(classType, methodName, mangled, type, isVirtual);
   }
 
   private parseEnumSpecifier(): CType {

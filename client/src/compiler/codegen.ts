@@ -115,6 +115,37 @@ export class CodeGenerator {
     for (let i = 0; i < bytes.length; i++) this.dataBytes[addr - 16 + i] = bytes[i] ?? 0;
   }
 
+  private vtableAddrs = new Map<CType, number>();
+
+  /** A vtable is just an array of function indices in the data segment — since a "function
+   * pointer" in our model already *is* its function index (see compileIndirectCall), each slot
+   * doubles directly as a valid `call_indirect` table index with no extra bookkeeping. Built
+   * lazily on first use (from a constructor or a virtual call site): by then every method,
+   * including overrides, has already been through registerFunction and has a stable funcIndex. */
+  private getOrBuildVtable(classType: CType): number {
+    const cached = this.vtableAddrs.get(classType);
+    if (cached !== undefined) return cached;
+    const bytes: number[] = [];
+    for (const m of classType.methods ?? []) {
+      if (!m.isVirtual) continue;
+      const g = this.globals.get(m.mangledName);
+      if (!g || !g.isFunc) throw new CodegenError(`internal: virtual method '${m.mangledName}' not registered`, { file: '', line: 0 });
+      bytes.push(...leBytes(BigInt(g.funcIndex!), 4));
+    }
+    const addr = alignUp(this.dataBase, 4);
+    this.dataBase = addr + Math.max(bytes.length, 4);
+    this.writeInitialBytes(addr, bytes);
+    this.vtableAddrs.set(classType, addr);
+    return addr;
+  }
+
+  /** Index of `name`'s slot within `classType`'s vtable — the position among virtual methods only, in declaration/inheritance order (overrides keep their base's slot, see parser's registerMethod). */
+  private vtableSlotIndex(classType: CType, name: string): number {
+    const idx = (classType.methods ?? []).filter((m) => m.isVirtual).findIndex((m) => m.name === name);
+    if (idx < 0) throw new CodegenError(`internal: virtual method '${name}' has no vtable slot`, { file: '', line: 0 });
+    return idx;
+  }
+
   declareGlobalVar(d: VarDecl): void {
     if (d.isExtern && !d.init) return; // reference to a global defined elsewhere; nothing to lay out
     const addr = this.reserveGlobal(d.name, d.type);
@@ -260,6 +291,10 @@ export class CodeGenerator {
     this.blockDepth = 1; // inside the synthetic exit block
     this.exitBlockDepth = 1; // matches the breakDepth/continueDepth convention: recorded post-increment
     bodyFb.block(retSlot ? valType(retSlot) : ValType.void);
+    if (fn.isCtor) {
+      const classType = this.currentClassType();
+      if (classType?.hasVtable) this.emitVtablePtrStore(classType);
+    }
     if (fn.isCtor && fn.memberInits) this.emitMemberInits(fn.memberInits);
     this.compileStmt(fn.body);
     // Non-void functions must produce a value for the block; if control falls off the end without
@@ -595,11 +630,38 @@ export class CodeGenerator {
     this.fb.op(slot === 'i64' ? Op.i64_eq : Op.i32_eq);
   }
 
-  /** Resolves a constructor's member-initializer list now that the enclosing class's field types are fully known (unlike at parse time — see parser.ts). Each entry either calls the field's own constructor (class-typed field) or is a plain `this->field = arg;` assignment (scalar field, exactly one arg). */
+  /** Stores this class's vtable address into the hidden vptr slot at `this`+0. Runs at the start
+   * of every constructor of a hasVtable class (user-written or the synthesized default one) so
+   * every object of this type ends up with a correctly-populated vptr before anything else runs. */
+  private emitVtablePtrStore(classType: CType): void {
+    const thisLocal = this.lookupLocal('this');
+    if (!thisLocal) return;
+    this.emitLocalAddr(thisLocal);
+    this.emitLoad(thisLocal.type, 0); // push `this` (the object's own address)
+    this.fb.i32Const(this.getOrBuildVtable(classType));
+    this.fb.mem(Op.i32_store, 2, 0);
+  }
+
+  /** Resolves a constructor's member-initializer list now that the enclosing class's field types are fully known (unlike at parse time — see parser.ts). Each entry either calls the base class's constructor (`: Base(args)`), the field's own constructor (class-typed field), or is a plain `this->field = arg;` assignment (scalar field, exactly one arg). */
   private emitMemberInits(inits: NonNullable<FunctionDecl['memberInits']>): void {
     const classType = this.currentClassType();
     if (!classType) return;
     for (const { field: fieldName, args, pos } of inits) {
+      if (classType.baseType && fieldName === classType.baseType.tag) {
+        const baseCtor = classType.baseType.methods?.find((mm) => mm.name === classType.baseType!.tag);
+        if (baseCtor) {
+          const g = this.globals.get(baseCtor.mangledName)!;
+          const thisLocal = this.lookupLocal('this')!;
+          this.emitLocalAddr(thisLocal);
+          this.emitLoad(thisLocal.type, 0);
+          if (classType.baseFieldOffset) this.fb.i32Const(classType.baseFieldOffset).op(Op.i32_add);
+          for (let i = 0; i < args.length; i++) {
+            this.compileArgFor(args[i], g.type.params![i + 1]);
+          }
+          this.fb.call(g.funcIndex!);
+        }
+        continue;
+      }
       const field = classType.fields?.find((f) => f.name === fieldName);
       if (!field) throw new CodegenError(`no member named '${fieldName}' in ${typeName(classType)}`, pos);
       const fieldCtor = (field.type.kind === 'struct' || field.type.kind === 'union') && field.type.tag
@@ -1550,7 +1612,12 @@ export class CodeGenerator {
     return fnType.returns!.kind === 'void' ? null : { type: fnType.returns! };
   }
 
-  /** `obj.method(args)` / `ptr->method(args)`: resolved to an ordinary call to the mangled global function, with `this` passed as an implicit first argument. No overloading, so lookup is by name only. */
+  /** `obj.method(args)` / `ptr->method(args)`: resolved to a call to the mangled global function
+   * (inherited methods are found directly since `methods` is already flattened — see parser's
+   * registerMethod), with `this` passed as an implicit first argument. No overloading, so lookup
+   * is by name only. A `virtual` method dispatches through the callee's own vtable instead of
+   * calling the statically-resolved function directly, so overrides in a more-derived runtime
+   * type take effect even when called through a base-typed pointer/reference. */
   private compileMethodCall(e: Extract<Expr, { kind: 'Call' }>, m: Extract<Expr, { kind: 'Member' }>): { type: CType } | null {
     let baseType = this.inferType(m.base);
     if (m.arrow) baseType = this.derefType(baseType);
@@ -1561,6 +1628,25 @@ export class CodeGenerator {
     if (!method) throw new CodegenError(`no member function named '${m.field}' in ${typeName(baseType)}`, e.pos);
     const g = this.globals.get(method.mangledName);
     if (!g || !g.isFunc) throw new CodegenError(`internal: method '${method.mangledName}' not registered`, e.pos);
+
+    if (method.isVirtual) {
+      const thisScratch = this.acquireScratch('i32');
+      if (m.arrow) this.compileExpr(m.base); else this.emitLvalueAddr(m.base);
+      this.fb.localSet(thisScratch);
+      this.fb.localGet(thisScratch); // `this`, as the call's implicit first argument
+      for (let i = 0; i < e.args.length; i++) {
+        this.compileArgFor(e.args[i], g.type.params![i + 1]);
+      }
+      this.fb.localGet(thisScratch);
+      this.fb.mem(Op.i32_load, 2, 0); // vptr = *(this + 0)
+      this.fb.mem(Op.i32_load, 2, this.vtableSlotIndex(baseType, method.name) * 4); // funcIndex = vptr[slot]
+      this.releaseScratch('i32', thisScratch);
+      const paramSlots = g.type.params!.map((p) => valType(slotOf(p)));
+      const resultSlots = g.type.returns!.kind === 'void' ? [] : [valType(slotOf(g.type.returns!))];
+      this.fb.callIndirect(this.mod.typeOf(paramSlots, resultSlots));
+      e.type = g.type.returns!;
+      return g.type.returns!.kind === 'void' ? null : { type: g.type.returns! };
+    }
 
     if (m.arrow) this.compileExpr(m.base); // already a pointer value = `this`
     else this.emitLvalueAddr(m.base); // `.` on an lvalue: `this` is its address

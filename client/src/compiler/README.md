@@ -61,14 +61,37 @@ an expression (`ClassName(args)`, e.g. `return Vector2D(x + o.x, y + o.y);`)
 — and references (`int &r = x;`, reference parameters and return values,
 including using a reference-returning call as an assignment target).
 
+**Single inheritance & virtual functions**: `class Derived : public Base`
+flattens the base's fields and methods into the derived type at parse time
+(so inherited members are found by plain name lookup, no base-chain walk),
+supports overriding, constructor base-init (`Derived(x) : Base(x) {}`),
+and `virtual` methods dispatched through a real vtable (an array of
+function indices in the data segment, indexed through the same
+`call_indirect` table function pointers already use) — so calling a
+virtual method through a base pointer/reference correctly runs the
+most-derived override, including when the call originates from an
+inherited non-virtual method. Classes with a vtable but no user-declared
+constructor get a synthesized one purely to stamp the vtable pointer.
+Multiple inheritance parses only the first base in the list (documented
+gap, see below).
+
 ## Known gaps (by design, not oversight)
 
 These are documented scope cuts, not bugs — each would be a substantial
 feature in its own right:
 
-- **No inheritance, virtual functions, or vtables.** A `class Derived :
-  public Base` base-clause parses (and is ignored) so it doesn't break
-  unrelated code, but members/methods aren't inherited.
+- **No multiple inheritance** — `class C : public A, public B` only keeps
+  `A`; single inheritance only.
+- **No virtual destructors / polymorphic `delete`** — `delete` always
+  calls the statically-resolved destructor for the pointer's declared
+  type, not a dynamically-dispatched one.
+- Base-class field offsets can differ between a standalone base object and
+  a base subobject embedded in a derived class, in the one case where a
+  base with **no** virtual functions is extended by a derived class that
+  introduces new ones (the derived class then needs its own vtable-pointer
+  slot, shifting the inherited base fields by 4 bytes within the derived
+  layout). Harmless unless something casts back to a `Base*` and reads a
+  field through it in that specific scenario.
 - **No operator overloading** — so no `std::cout <<` / iostream. Use
   `printf`/`scanf` (fully supported) in C++ files too.
 - **No rvalue references** (`T&&`) — only ordinary lvalue references.
@@ -99,3 +122,5 @@ unit-style suites (lexer/parser/preprocessor/wasm/codegen/driver),
 algorithms, BSTs, backtracking, multi-file modules with shared headers,
 classes composing classes) — this is what's actually caught most of the
 real bugs during development, well beyond what hand-picked unit tests find.
+`tests/references-smoke.ts` and `tests/inheritance-smoke.ts` cover the C++
+reference and single-inheritance/virtual-function features specifically.

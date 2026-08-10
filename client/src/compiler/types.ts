@@ -26,6 +26,18 @@ export interface CType {
   methods?: ClassMethod[]; // C++ classes/structs only
   ctorName?: string; // mangled name of the 0-arg constructor, if any (for auto-default-construct)
   dtorName?: string; // mangled name of the destructor, if any
+  /** C++ single inheritance: the direct base class, if any. `fields`/`methods` are already
+   * flattened to include the base's (with overrides applied in place), so member/method lookup
+   * needs no base-chain walk — see makeStruct and parser's class-body handling. */
+  baseType?: CType;
+  /** True if this class or any base declares a virtual method — decides whether objects of this
+   * type carry a vtable pointer at all. */
+  hasVtable?: boolean;
+  /** Byte offset of the base-class subobject within this class: 0 unless this class introduces
+   * its own vtable pointer while its base has none (in which case the base's fields — laid out
+   * assuming no vptr — are shifted by 4 within this class, so calls into the base's own methods
+   * with a raw `this` need this offset added). */
+  baseFieldOffset?: number;
   // function
   params?: CType[];
   paramNames?: string[];
@@ -53,6 +65,7 @@ export interface ClassMethod {
   name: string; // unqualified method name, e.g. "distance"
   mangledName: string; // globally-unique function name, e.g. "Point__distance"
   type: CType; // function type, params[0] is always the `this` pointer
+  isVirtual?: boolean; // dispatched through the vtable rather than called directly
 }
 
 const cache: Record<string, CType> = {};
@@ -98,10 +111,32 @@ function align(n: number, a: number): number {
   return a <= 1 ? n : Math.ceil(n / a) * a;
 }
 
-export function makeStruct(tag: string, fields: { name: string; type: CType }[], isUnion: boolean): CType {
+/**
+ * `baseType`/`needsOwnVptr` implement C++ single inheritance: when present, the base's own
+ * (already-flattened) fields are copied in as a prefix subobject, then this class's own fields
+ * follow. `needsOwnVptr` reserves a leading 4-byte vtable-pointer slot for classes that introduce
+ * a vtable that their base doesn't already carry — see CType.baseFieldOffset for why this matters
+ * to base-constructor calls.
+ */
+export function makeStruct(
+  tag: string,
+  fields: { name: string; type: CType }[],
+  isUnion: boolean,
+  baseType?: CType,
+  needsOwnVptr?: boolean,
+): CType {
   let offset = 0;
   let maxAlign = 1;
   const laidOut: StructField[] = [];
+  if (needsOwnVptr) {
+    offset = 4;
+    maxAlign = Math.max(maxAlign, 4);
+  }
+  if (baseType) {
+    maxAlign = Math.max(maxAlign, baseType.align);
+    for (const f of baseType.fields ?? []) laidOut.push({ name: f.name, type: f.type, offset: f.offset + offset });
+    offset += baseType.size;
+  }
   for (const f of fields) {
     maxAlign = Math.max(maxAlign, f.type.align);
     if (isUnion) {
