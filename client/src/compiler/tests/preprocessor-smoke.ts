@@ -1,4 +1,4 @@
-import { Preprocessor, type FileResolver } from '../preprocessor.ts';
+import { Preprocessor, type FileResolver } from '../preprocessor';
 
 function spell(tokens: { text: string }[]): string {
   return tokens.map((t) => t.text).join(' ');

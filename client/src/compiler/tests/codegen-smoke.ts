@@ -1,8 +1,8 @@
-import { Preprocessor, type FileResolver } from '../preprocessor.ts';
-import { Parser } from '../parser.ts';
-import { CodeGenerator } from '../codegen.ts';
-import { Types, functionType, pointerTo } from '../types.ts';
-import type { TopDecl } from '../ast.ts';
+import { Preprocessor, type FileResolver } from '../preprocessor';
+import { Parser } from '../parser';
+import { CodeGenerator } from '../codegen';
+import { Types, functionType, pointerTo } from '../types';
+import type { TopDecl } from '../ast';
 
 const resolver: FileResolver = { resolveQuoted: () => undefined, resolveAngle: () => undefined };
 

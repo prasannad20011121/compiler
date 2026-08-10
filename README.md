@@ -7,7 +7,7 @@ A browser-based VS Code-style IDE where **all code execution happens locally in 
 | JavaScript | Sandboxed Web Worker (ES module graph via blob URLs) | browser engine |
 | TypeScript | TS 5.9 compiler in worker → run as JS | TS 5.9.3 |
 | Python | Pyodide (CPython in WASM), self-hosted core | 3.14.2 |
-| C / C++ | clang 8 + lld in WASM (binji/wasm-clang) → WASI-ish shim | C11 / C++17 |
+| C / C++ | our own from-scratch compiler (`client/src/compiler/`) → WASM directly, no LLVM | practical C17 subset; C++ classes/constructors/destructors/`new`/`delete` — no templates, inheritance, virtual functions, operator overloading, exceptions, or STL (see `client/src/compiler/README.md`) |
 | Java | teavm-javac (javac 21 in WASM → TeaVM) | Java 21 |
 | C# | .NET 9 WASM + Roslyn in-browser compiler | .NET 9.0 |
 

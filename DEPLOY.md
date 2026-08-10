@@ -54,13 +54,6 @@ Open the Pages URL and check:
 
 | Service | Limit | Impact |
 |---|---|---|
-| Cloudflare Pages | 25 MB per file, 500 builds/month | Largest runtime file is ~30 MB clang… see note |
+| Cloudflare Pages | 25 MB per file, 500 builds/month | No runtime file comes close (C/C++ is our own compiler, bundled with the app — no vendored toolchain) |
 | Render free | Sleeps after 15 min idle | Cloud save waits ~30 s on first use |
 | Atlas M0 | 512 MB storage | Thousands of projects |
-
-**Note on the 25 MB limit:** `runtimes/wasm-clang/8.0.1/clang` is ~30 MB, which exceeds
-Cloudflare Pages' per-file limit. Two free options:
-- Easiest: host the site on **Netlify** instead (no 25 MB file limit; 100 GB/month bandwidth
-  is plenty for personal use). Same build settings; `_headers` works there too.
-- Or keep Cloudflare Pages and serve just the `wasm-clang` folder from a Cloudflare **R2**
-  bucket (free 10 GB) behind the same domain.

@@ -23,6 +23,9 @@ export interface CType {
   // struct/union
   tag?: string;
   fields?: StructField[];
+  methods?: ClassMethod[]; // C++ classes/structs only
+  ctorName?: string; // mangled name of the 0-arg constructor, if any (for auto-default-construct)
+  dtorName?: string; // mangled name of the destructor, if any
   // function
   params?: CType[];
   paramNames?: string[];
@@ -38,6 +41,13 @@ export interface StructField {
   name: string;
   type: CType;
   offset: number;
+}
+
+/** A C++ member function, resolved to an ordinary global function taking an explicit `this` first parameter. No overloading: one entry per name. */
+export interface ClassMethod {
+  name: string; // unqualified method name, e.g. "distance"
+  mangledName: string; // globally-unique function name, e.g. "Point__distance"
+  type: CType; // function type, params[0] is always the `this` pointer
 }
 
 const cache: Record<string, CType> = {};

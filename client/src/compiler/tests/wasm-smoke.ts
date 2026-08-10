@@ -1,5 +1,5 @@
-import { ModuleBuilder } from '../wasm/module.ts';
-import { ValType } from '../wasm/opcodes.ts';
+import { ModuleBuilder } from '../wasm/module';
+import { ValType } from '../wasm/opcodes';
 
 // Hand-assemble: imported env.print_i32(i32); exported add(i32,i32)->i32;
 // exported main() that computes add(2,3) and prints it, plus writes "hi" to memory

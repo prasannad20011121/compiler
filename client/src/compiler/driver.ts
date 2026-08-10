@@ -1,10 +1,10 @@
-import { Preprocessor, type FileResolver } from './preprocessor.ts';
-import { Parser, ParseError } from './parser.ts';
-import { LexError } from './lexer.ts';
-import { CodeGenerator, CodegenError } from './codegen.ts';
-import { Types, functionType, pointerTo } from './types.ts';
-import type { TopDecl } from './ast.ts';
-import { LIBC_SOURCE } from './runtime/libc.ts';
+import { Preprocessor, type FileResolver } from './preprocessor';
+import { Parser, ParseError } from './parser';
+import { LexError } from './lexer';
+import { CodeGenerator, CodegenError } from './codegen';
+import { Types, functionType, pointerTo } from './types';
+import type { TopDecl } from './ast';
+import { LIBC_SOURCE } from './runtime/libc';
 
 export interface SourceFile {
   path: string;

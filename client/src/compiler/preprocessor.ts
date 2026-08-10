@@ -1,4 +1,4 @@
-import { tokenize, type Token } from './lexer.ts';
+import { tokenize, type Token } from './lexer';
 
 export class PreprocessorError extends Error {
   constructor(message: string, file: string, line: number) {

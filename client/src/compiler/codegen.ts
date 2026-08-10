@@ -1,12 +1,12 @@
-import type { CType } from './types.ts';
+import type { CType } from './types';
 import {
   Types, pointerTo, isIntegerType, isFloatType, isArithmeticType, isPointerType, isScalarType,
   is64BitInt, isUnsigned, typeEquals, typeName,
-} from './types.ts';
-import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl } from './ast.ts';
-import { ModuleBuilder, FuncBuilder } from './wasm/module.ts';
-import { ValType, Op } from './wasm/opcodes.ts';
-import type { ValType as VT } from './wasm/opcodes.ts';
+} from './types';
+import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl } from './ast';
+import { ModuleBuilder, FuncBuilder } from './wasm/module';
+import { ValType, Op } from './wasm/opcodes';
+import type { ValType as VT } from './wasm/opcodes';
 
 export class CodegenError extends Error {
   constructor(message: string, pos: { file: string; line: number }) {
@@ -567,7 +567,30 @@ export class CodeGenerator {
   private compileLocalVarDecl(d: VarDecl): void {
     if (d.isExtern) return; // reference to a global; no local slot
     const off = this.allocLocal(d.name, d.type);
-    if (d.init) this.emitInitializer(d.type, off, d.init);
+    if (d.init) {
+      this.emitInitializer(d.type, off, d.init);
+      return;
+    }
+    if (d.ctorArgs) {
+      // `ClassName obj(args...);` direct-initialization.
+      const ctorMethod = d.type.tag ? d.type.methods?.find((mm) => mm.name === d.type.tag) : undefined;
+      if (!ctorMethod) throw new CodegenError(`${typeName(d.type)} has no matching constructor`, d.pos);
+      const g = this.globals.get(ctorMethod.mangledName)!;
+      this.emitAddrOfSlot(off);
+      for (let i = 0; i < d.ctorArgs.length; i++) {
+        const a = this.compileExpr(d.ctorArgs[i])!;
+        this.convert(a.type, g.type.params![i + 1]);
+      }
+      this.fb.call(g.funcIndex!);
+      return;
+    }
+    // C++: a class-typed local with no initializer auto-invokes its 0-arg constructor, if any.
+    // (Destructors are NOT auto-invoked at scope exit — no RAII; see class docs/gaps.)
+    if (d.type.ctorName) {
+      const g = this.globals.get(d.type.ctorName)!;
+      this.emitAddrOfSlot(off);
+      this.fb.call(g.funcIndex!);
+    }
   }
 
   private emitInitializer(type: CType, offset: number, init: Expr): void {
@@ -688,9 +711,60 @@ export class CodeGenerator {
       }
       case 'InitList':
         throw new CodegenError('initializer list used outside of a declaration', e.pos);
+      case 'New': {
+        const classType = e.targetType;
+        const mallocG = this.globals.get('malloc');
+        if (!mallocG || !mallocG.isFunc) throw new CodegenError("'new' requires malloc from the runtime", e.pos);
+        this.fb.i32Const(Math.max(classType.size, 1));
+        this.fb.call(mallocG.funcIndex!);
+        const ptrScratch = this.acquireScratch('i32');
+        this.fb.localSet(ptrScratch);
+        const ctorMethod = classType.tag ? classType.methods?.find((mm) => mm.name === classType.tag) : undefined;
+        if (ctorMethod) {
+          const g = this.globals.get(ctorMethod.mangledName)!;
+          this.fb.localGet(ptrScratch);
+          for (let i = 0; i < e.args.length; i++) {
+            const a = this.compileExpr(e.args[i])!;
+            this.convert(a.type, g.type.params![i + 1]);
+          }
+          this.fb.call(g.funcIndex!);
+        }
+        this.fb.localGet(ptrScratch);
+        this.releaseScratch('i32', ptrScratch);
+        e.type = pointerTo(classType);
+        return { type: e.type };
+      }
+      case 'Delete': {
+        const t = this.compileExpr(e.operand)!;
+        const pointeeType = t.type.pointee;
+        const freeG = this.globals.get('free');
+        if (pointeeType?.dtorName) {
+          const ptrScratch = this.acquireScratch('i32');
+          this.fb.localSet(ptrScratch);
+          this.fb.localGet(ptrScratch);
+          this.fb.call(this.globals.get(pointeeType.dtorName)!.funcIndex!);
+          this.fb.localGet(ptrScratch);
+          this.releaseScratch('i32', ptrScratch);
+        }
+        if (freeG && freeG.isFunc) this.fb.call(freeG.funcIndex!);
+        else this.fb.op(Op.drop);
+        e.type = Types.void;
+        return null;
+      }
       default:
         throw new CodegenError(`expression kind '${(e as Expr).kind}' is not supported yet`, (e as Expr).pos);
     }
+  }
+
+  /** Inside a C++ method, bare identifiers may refer to the current class's fields (`x` meaning `this->x`). */
+  private currentClassType(): CType | null {
+    if (!this.currentFn || !this.currentFn.className) return null;
+    return this.currentFn.type.params![0].pointee!;
+  }
+  private implicitThisMember(name: string, pos: Expr['pos']): Expr | null {
+    const classType = this.currentClassType();
+    if (!classType || !classType.fields?.some((f) => f.name === name)) return null;
+    return { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: name, arrow: true, pos };
   }
 
   private compileIdentLoad(e: Extract<Expr, { kind: 'Ident' }>): { type: CType } {
@@ -715,6 +789,8 @@ export class CodeGenerator {
       e.type = pointerTo(g.type);
       return { type: e.type };
     }
+    const implicitThis = this.implicitThisMember(e.name, e.pos);
+    if (implicitThis) return this.compileExpr(implicitThis)!;
     throw new CodegenError(`use of undeclared identifier '${e.name}'`, e.pos);
   }
 
@@ -745,6 +821,8 @@ export class CodeGenerator {
         e.type = g.type;
         return { type: g.type };
       }
+      const implicitThis = this.implicitThisMember(e.name, e.pos);
+      if (implicitThis) return this.emitLvalueAddr(implicitThis);
       throw new CodegenError(`use of undeclared identifier '${e.name}'`, e.pos);
     }
     if (e.kind === 'Unary' && e.op === '*') {
@@ -810,6 +888,9 @@ export class CodeGenerator {
         if (l) return l.type;
         const g = this.globals.get(e.name);
         if (g) return g.isFunc ? pointerTo(g.type) : g.type;
+        const classType = this.currentClassType();
+        const field = classType?.fields?.find((f) => f.name === e.name);
+        if (field) return field.type;
         throw new CodegenError(`use of undeclared identifier '${e.name}'`, e.pos);
       }
       case 'Unary':
@@ -1170,9 +1251,20 @@ export class CodeGenerator {
       const special = this.tryCompileBuiltinCall(e.callee.name, e.args, e.pos);
       if (special !== undefined) return special;
     }
+    if (e.callee.kind === 'Member') return this.compileMethodCall(e, e.callee);
     if (e.callee.kind !== 'Ident') throw new CodegenError('only direct function calls are supported', e.pos);
-    const g = this.globals.get(e.callee.name);
-    if (!g || !g.isFunc) throw new CodegenError(`call to undeclared function '${e.callee.name}'`, e.pos);
+    const calleeName = e.callee.name;
+    if (!this.globals.has(calleeName)) {
+      // Inside a method, an unqualified call to another method of the same class means `this->name(...)`.
+      const classType = this.currentClassType();
+      if (classType?.methods?.some((mm) => mm.name === calleeName)) {
+        const pos = e.pos;
+        const implicitCallee: Extract<Expr, { kind: 'Member' }> = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: calleeName, arrow: true, pos };
+        return this.compileMethodCall(e, implicitCallee);
+      }
+    }
+    const g = this.globals.get(calleeName);
+    if (!g || !g.isFunc) throw new CodegenError(`call to undeclared function '${calleeName}'`, e.pos);
     const fixedCount = g.type.params!.length;
     for (let i = 0; i < fixedCount; i++) {
       const a = this.compileExpr(e.args[i])!;
@@ -1195,6 +1287,30 @@ export class CodeGenerator {
     }
     e.type = g.type.returns!;
     this.fb.call(g.funcIndex!);
+    return g.type.returns!.kind === 'void' ? null : { type: g.type.returns! };
+  }
+
+  /** `obj.method(args)` / `ptr->method(args)`: resolved to an ordinary call to the mangled global function, with `this` passed as an implicit first argument. No overloading, so lookup is by name only. */
+  private compileMethodCall(e: Extract<Expr, { kind: 'Call' }>, m: Extract<Expr, { kind: 'Member' }>): { type: CType } | null {
+    let baseType = this.inferType(m.base);
+    if (m.arrow) baseType = this.derefType(baseType);
+    if (baseType.kind !== 'struct' && baseType.kind !== 'union') {
+      throw new CodegenError(`member function call on non-class type ${typeName(baseType)}`, e.pos);
+    }
+    const method = baseType.methods?.find((mm) => mm.name === m.field);
+    if (!method) throw new CodegenError(`no member function named '${m.field}' in ${typeName(baseType)}`, e.pos);
+    const g = this.globals.get(method.mangledName);
+    if (!g || !g.isFunc) throw new CodegenError(`internal: method '${method.mangledName}' not registered`, e.pos);
+
+    if (m.arrow) this.compileExpr(m.base); // already a pointer value = `this`
+    else this.emitLvalueAddr(m.base); // `.` on an lvalue: `this` is its address
+
+    for (let i = 0; i < e.args.length; i++) {
+      const a = this.compileExpr(e.args[i])!;
+      this.convert(a.type, g.type.params![i + 1]);
+    }
+    this.fb.call(g.funcIndex!);
+    e.type = g.type.returns!;
     return g.type.returns!.kind === 'void' ? null : { type: g.type.returns! };
   }
 

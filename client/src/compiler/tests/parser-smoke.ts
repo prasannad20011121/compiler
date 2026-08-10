@@ -1,7 +1,7 @@
-import { Preprocessor, type FileResolver } from '../preprocessor.ts';
-import { Parser } from '../parser.ts';
-import type { TopDecl } from '../ast.ts';
-import { typeName } from '../types.ts';
+import { Preprocessor, type FileResolver } from '../preprocessor';
+import { Parser } from '../parser';
+import type { TopDecl } from '../ast';
+import { typeName } from '../types';
 
 const resolver: FileResolver = {
   resolveQuoted: () => undefined,

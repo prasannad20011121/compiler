@@ -1,7 +1,7 @@
-import type { Token } from './lexer.ts';
-import type { CType } from './types.ts';
-import { Types, pointerTo, arrayOf, functionType, makeStruct } from './types.ts';
-import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl, Pos } from './ast.ts';
+import type { Token } from './lexer';
+import type { CType } from './types';
+import { Types, pointerTo, arrayOf, functionType, makeStruct } from './types';
+import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl, Pos } from './ast';
 
 export class ParseError extends Error {
   constructor(message: string, tok: Token) {
@@ -28,6 +28,8 @@ export class Parser {
   private typedefScopes: Set<string>[] = [new Set()];
   private tags = new Map<string, CType>();
   private enumConsts = new Map<string, bigint>();
+  /** Member function definitions found while parsing a class/struct body (C++ mode), drained into the top-level decl list after the enclosing declaration finishes. */
+  private pendingMethodDecls: FunctionDecl[] = [];
   cpp: boolean;
 
   constructor(tokens: Token[], cpp = false) {
@@ -124,6 +126,15 @@ export class Parser {
   }
 
   private parseExternalDeclaration(): TopDecl[] {
+    const out = this.parseExternalDeclarationInner();
+    if (this.pendingMethodDecls.length > 0) {
+      out.push(...this.pendingMethodDecls);
+      this.pendingMethodDecls = [];
+    }
+    return out;
+  }
+
+  private parseExternalDeclarationInner(): TopDecl[] {
     const spec = this.parseDeclSpecifiers();
 
     // `struct Foo { ... };` with no declarator at all.
@@ -219,8 +230,8 @@ export class Parser {
       if (STORAGE_KEYWORDS.has(t.text)) { this.advance(); continue; }
       if (QUALIFIER_KEYWORDS.has(t.text)) { this.advance(); continue; }
 
-      if (t.text === 'struct' || t.text === 'union') {
-        resolved = this.parseStructOrUnionSpecifier(t.text === 'union');
+      if (t.text === 'struct' || t.text === 'union' || (this.cpp && t.text === 'class')) {
+        resolved = this.parseStructOrUnionSpecifier(t.text === 'union', t.text === 'class');
         continue;
       }
       if (t.text === 'enum') {
@@ -272,10 +283,10 @@ export class Parser {
     this.typedefTable.set(name, type);
   }
 
-  private parseStructOrUnionSpecifier(isUnion: boolean): CType {
-    this.advance(); // struct/union
+  private parseStructOrUnionSpecifier(isUnion: boolean, isClass = false): CType {
+    this.advance(); // struct/union/class
     let tag: string | null = null;
-    if (this.cur().kind === 'ident' && !this.isPunct('{')) {
+    if (this.cur().kind === 'ident' && !this.isPunct('{') && !this.isPunct(':')) {
       tag = this.cur().text;
       this.advance();
     }
@@ -291,29 +302,134 @@ export class Parser {
       placeholder = { kind: isUnion ? 'union' : 'struct', size: 0, align: 1, tag: tag ?? undefined, fields: [] };
       if (key) this.tags.set(key, placeholder);
     }
+    // C++ (unlike C) allows a class/struct name to be used as a type-name on its own, without a
+    // leading `struct`/`class` keyword — register it the same way a typedef would be.
+    if (this.cpp && tag) {
+      this.typedefScopes[0].add(tag);
+      this.registerTypedef(tag, placeholder);
+    }
+    // (Single/multiple inheritance is not supported: `class Derived : public Base` parses the
+    // base-clause and ignores it, so simple non-inheriting classes elsewhere in the same file
+    // still compile — documented gap.)
+    if (this.isPunct(':')) {
+      this.advance();
+      do {
+        while (this.isKw('public') || this.isKw('private') || this.isKw('protected') || this.isKw('virtual')) this.advance();
+        this.expectIdent();
+      } while (this.eatPunct(','));
+    }
     if (this.eatPunct('{')) {
       const fields: { name: string; type: CType }[] = [];
       while (!this.isPunct('}')) {
+        if ((this.isKw('public') || this.isKw('private') || this.isKw('protected')) && this.peek(1).kind === 'punct' && this.peek(1).text === ':') {
+          this.advance();
+          this.advance();
+          continue;
+        }
+        if (this.cpp && this.isPunct('~') && tag && this.isKw(tag, 1)) {
+          this.advance();
+          const methodName = '~' + this.advance().text;
+          this.parseMemberFunction(placeholder, tag, methodName, Types.void, false, true);
+          continue;
+        }
+        if (this.cpp && tag && this.isKw(tag) && this.peek(1).kind === 'punct' && this.peek(1).text === '(') {
+          const methodName = this.advance().text;
+          this.parseMemberFunction(placeholder, tag, methodName, Types.void, true, false);
+          continue;
+        }
         const spec = this.parseDeclSpecifiers();
         if (this.eatPunct(';')) continue; // anonymous member (e.g. unnamed nested struct) — skip
+        let sawMethod = false;
         for (;;) {
           const d = this.parseDeclarator(spec.type);
+          if (!d.name) throw new ParseError('expected member name', this.cur());
+          if (this.cpp && d.type.kind === 'function' && (this.isPunct('{') || this.isPunct(';'))) {
+            // parseMemberFunctionRest already consumes the trailing ';' (prototype) or '{...}' (body) — no comma-list continuation applies to methods.
+            this.parseMemberFunctionRest(placeholder, tag ?? '<anon>', d.name, d.type);
+            sawMethod = true;
+            break;
+          }
           if (this.eatPunct(':')) {
             this.parseConditional(); // bit-field width: parsed and discarded (bit-fields unsupported)
           }
-          if (!d.name) throw new ParseError('expected member name', this.cur());
           fields.push({ name: d.name, type: d.type });
           if (!this.eatPunct(',')) break;
         }
-        this.expectPunct(';');
+        if (!sawMethod) this.expectPunct(';');
       }
       this.expectPunct('}');
       const completed = makeStruct(tag ?? `<anon@${this.pos}>`, fields, isUnion);
       Object.assign(placeholder, completed);
+      void isClass;
       return placeholder;
     }
-    if (!tag) throw new ParseError('expected struct/union tag or body', this.cur());
+    if (!tag) throw new ParseError('expected struct/union/class tag or body', this.cur());
     return placeholder;
+  }
+
+  /** Parses a constructor (`Foo(...)`) or destructor (`~Foo()`) body/prototype. */
+  private parseMemberFunction(classType: CType, className: string, methodName: string, returnType: CType, isCtor: boolean, isDtor: boolean): void {
+    this.expectPunct('(');
+    const { params, names } = this.parseParamList();
+    this.expectPunct(')');
+    while (this.isKw('const') || this.isKw('override') || this.isKw('noexcept')) this.advance();
+    const mangled = `${className}__${isDtor ? 'dtor' : methodName}`;
+    const fullParams = [pointerTo(classType), ...params];
+    const fullNames = ['this', ...names];
+    const type = functionType(fullParams, returnType, false, fullNames);
+
+    // Member-initializer list (`: field(expr), field2(expr2)`): translated into plain
+    // `this->field = expr;` assignments prepended to the constructor body. Only the common
+    // single-expression-per-member form is supported — no base-class delegation (no inheritance)
+    // and no aggregate/brace-init member expressions.
+    const initStmts: Stmt[] = [];
+    if (this.isPunct(':')) {
+      this.advance();
+      do {
+        const pos = this.pos_();
+        const fieldName = this.expectIdent();
+        const open = this.isPunct('(') ? '(' : this.isPunct('{') ? '{' : null;
+        if (!open) throw new ParseError('expected member-initializer arguments', this.cur());
+        this.advance();
+        const value = this.parseAssignment();
+        this.expectPunct(open === '(' ? ')' : '}');
+        const target: Expr = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: fieldName, arrow: true, pos };
+        initStmts.push({ kind: 'ExprStmt', expr: { kind: 'Assign', op: '=', target, value, pos }, pos });
+      } while (this.eatPunct(','));
+    }
+
+    let body = null;
+    if (this.isPunct('{')) {
+      const parsed = this.parseCompound();
+      body = parsed.kind === 'Compound' ? { ...parsed, body: [...initStmts, ...parsed.body] } : parsed;
+    } else {
+      this.expectPunct(';');
+    }
+    const fn: FunctionDecl = {
+      kind: 'FunctionDecl', name: mangled, type, paramNames: fullNames, body,
+      isStatic: false, className, isCtor, isDtor, pos: this.pos_(),
+    };
+    this.pendingMethodDecls.push(fn);
+    (classType.methods ??= []).push({ name: methodName, mangledName: mangled, type });
+    if (isCtor && params.length === 0) classType.ctorName = mangled;
+    if (isDtor) classType.dtorName = mangled;
+  }
+
+  /** Parses the remainder of an ordinary method whose return type + name + params were already consumed as a normal declarator. */
+  private parseMemberFunctionRest(classType: CType, className: string, methodName: string, funcType: CType): void {
+    const mangled = `${className}__${methodName}`;
+    const fullParams = [pointerTo(classType), ...funcType.params!];
+    const fullNames = ['this', ...(funcType.paramNames ?? [])];
+    const type = functionType(fullParams, funcType.returns!, funcType.variadic ?? false, fullNames);
+    let body = null;
+    if (this.isPunct('{')) body = this.parseCompound();
+    else this.expectPunct(';');
+    const fn: FunctionDecl = {
+      kind: 'FunctionDecl', name: mangled, type, paramNames: fullNames, body,
+      isStatic: false, className, pos: this.pos_(),
+    };
+    this.pendingMethodDecls.push(fn);
+    (classType.methods ??= []).push({ name: methodName, mangledName: mangled, type });
   }
 
   private parseEnumSpecifier(): CType {
@@ -451,6 +567,25 @@ export class Parser {
   private parseDeclStmt(): Stmt {
     const pos = this.pos_();
     const spec = this.parseDeclSpecifiers();
+
+    // C++ direct-initialization: `ClassName obj(args...);`. Unambiguous in practice — the
+    // "most vexing parse" only bites when the parenthesized content could *also* be a valid
+    // parameter-type-list, which essentially never happens for argument expressions (literals,
+    // other locals, etc. aren't type-names), so we don't attempt full disambiguation.
+    if (this.cpp && !spec.isTypedef && spec.type.kind === 'struct' && this.cur().kind === 'ident' && this.isPunct('(', 1)) {
+      const name = this.advance().text;
+      this.advance(); // '('
+      const args: Expr[] = [];
+      if (!this.isPunct(')')) {
+        args.push(this.parseAssignment());
+        while (this.eatPunct(',')) args.push(this.parseAssignment());
+      }
+      this.expectPunct(')');
+      this.expectPunct(';');
+      const decl: VarDecl = { kind: 'VarDecl', name, type: spec.type, init: null, ctorArgs: args, isStatic: spec.isStatic, isExtern: spec.isExtern, pos };
+      return { kind: 'DeclStmt', decls: [decl], pos };
+    }
+
     const decls: VarDecl[] = [];
     if (!this.isPunct(';')) {
       for (;;) {
@@ -712,7 +847,11 @@ export class Parser {
     if (this.cpp) {
       if (t.kind === 'ident' && t.text === 'new') {
         this.advance();
-        const targetType = this.parseTypeName();
+        // Deliberately not the general parseTypeName(): that greedily consumes a trailing '('
+        // as an abstract *function* declarator, which is wrong here — `(...)` after the type in
+        // a new-expression is always the constructor argument list. `new T[n]` (array-new) isn't
+        // supported (documented gap, alongside the matching `delete[]` limitation).
+        const targetType = this.parseDeclSpecifiers().type;
         const args: Expr[] = [];
         if (this.eatPunct('(')) {
           if (!this.isPunct(')')) {

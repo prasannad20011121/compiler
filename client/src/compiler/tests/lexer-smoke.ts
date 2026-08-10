@@ -1,4 +1,4 @@
-import { tokenize } from '../lexer.ts';
+import { tokenize } from '../lexer';
 
 const src = `
 int main(void) {

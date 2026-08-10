@@ -1,6 +1,6 @@
-import { ByteWriter } from './leb128.ts';
-import { SectionId, ExportKind, ImportKind, Op, ValType } from './opcodes.ts';
-import type { ValType as VT } from './opcodes.ts';
+import { ByteWriter } from './leb128';
+import { SectionId, ExportKind, ImportKind, Op, ValType } from './opcodes';
+import type { ValType as VT } from './opcodes';
 
 export interface FuncType {
   params: VT[];

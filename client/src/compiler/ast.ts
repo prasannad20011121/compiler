@@ -1,4 +1,4 @@
-import type { CType } from './types.ts';
+import type { CType } from './types';
 
 export interface Pos {
   file: string;
@@ -59,6 +59,8 @@ export interface VarDecl {
   name: string;
   type: CType;
   init: Expr | null;
+  /** C++ direct-initialization args (`ClassName obj(args);`), mutually exclusive with `init`. */
+  ctorArgs?: Expr[];
   isStatic: boolean;
   isExtern: boolean;
   pos: Pos;

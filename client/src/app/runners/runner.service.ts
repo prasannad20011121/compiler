@@ -24,7 +24,7 @@ const LANGUAGE_BY_EXT: Record<string, Language> = {
 const LANGUAGE_LABEL: Record<Language, string> = {
   js: 'JavaScript/TypeScript',
   python: 'Python 3.14 (Pyodide)',
-  cpp: 'C/C++ (clang → WASM)',
+  cpp: 'C/C++ (self-hosted compiler → WASM)',
   java: 'Java 21 (javac + TeaVM)',
   csharp: 'C# (.NET 9 WASM)',
 };
@@ -121,14 +121,8 @@ export class RunnerService {
         indexURL: `${location.origin}/runtimes/pyodide/${version}/`,
       });
     } else if (language === 'cpp') {
-      const version = runtimesManifest.runtimes['wasm-clang'].version;
-      worker.postMessage({
-        type: 'run',
-        entry,
-        files,
-        stdinSab: this.stdinSab,
-        indexURL: `${location.origin}/runtimes/wasm-clang/${version}/`,
-      });
+      // Our own compiler ships as part of the app bundle — no runtime download.
+      worker.postMessage({ type: 'run', entry, files, stdinSab: this.stdinSab });
     } else if (language === 'java') {
       const version = runtimesManifest.runtimes['teavm-javac'].version;
       worker.postMessage({
@@ -165,8 +159,10 @@ export class RunnerService {
       return this.pythonWorker;
     }
     if (language === 'cpp') {
-      // Classic worker served straight from public/ — wraps the vendored toolchain driver.
-      this.cppWorker ??= new Worker('/cpp-worker.js');
+      // Our own compiler, bundled with the app like any other TS module — no vendored toolchain.
+      this.cppWorker ??= new Worker(new URL('../../workers/cpp-runner.worker', import.meta.url), {
+        type: 'module',
+      });
       return this.cppWorker;
     }
     if (language === 'java') {

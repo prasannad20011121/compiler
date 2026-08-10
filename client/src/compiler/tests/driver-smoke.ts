@@ -1,4 +1,4 @@
-import { compileProgram } from '../driver.ts';
+import { compileProgram } from '../driver';
 
 let ok = true;
 function check(cond: boolean, label: string) {
