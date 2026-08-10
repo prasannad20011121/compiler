@@ -243,6 +243,10 @@ export class CodeGenerator {
       paramOffsets.push(off);
     }
     const varargBufParamIndex = fn.type.variadic ? params.length : -1;
+    // Allocate (but don't yet fill) the hidden vararg-buffer-pointer slot before compiling the body:
+    // va_start()/va_arg() calls inside the body need to find it via lookupLocal('__va') as they're
+    // compiled. The actual store of the incoming pointer happens later, in the prologue below.
+    const vaSlotOffset = varargBufParamIndex >= 0 ? this.allocLocal('__va', pointerTo(Types.void)) : -1;
 
     // Body bytes are built into a scratch FuncBuilder so we learn frameSize before finalizing the prologue.
     const bodyFb = new FuncBuilder(this.fb.paramTypes, this.fb.resultTypes);
@@ -275,9 +279,8 @@ export class CodeGenerator {
       this.emitStoreParamIntoSlot(i, params[i], paramOffsets[i]);
     }
     if (varargBufParamIndex >= 0) {
-      // Store the vararg buffer pointer into a reserved local slot named "__va" for va_start().
-      const off = this.allocLocal('__va', pointerTo(Types.void));
-      this.emitAddrOfSlot(off);
+      // Store the incoming vararg buffer pointer into the slot reserved above, for va_start().
+      this.emitAddrOfSlot(vaSlotOffset);
       realFb.localGet(varargBufParamIndex);
       this.emitStore(Types.uint, 0);
     }
@@ -1229,6 +1232,26 @@ export class CodeGenerator {
       this.releaseScratch('i32', ptrScratch);
       return { type: kind };
     }
+    if (name === '__builtin_heap_base') {
+      this.fb.globalGet(this.heapBaseGlobal);
+      return { type: Types.uint };
+    }
+    if (name === '__builtin_memory_grow') {
+      const t = this.compileExpr(args[0])!;
+      this.convert(t.type, Types.uint);
+      this.fb.op(Op.memory_grow);
+      this.fb.op(0x00); // reserved memory-index byte
+      return { type: Types.int };
+    }
+    if (name === '__builtin_memory_size') {
+      this.fb.op(Op.memory_size);
+      this.fb.op(0x00); // reserved memory-index byte
+      return { type: Types.int };
+    }
+    if (name === '__builtin_trap') {
+      this.fb.op(Op.unreachable);
+      return null;
+    }
     return undefined;
   }
 
@@ -1237,7 +1260,22 @@ export class CodeGenerator {
   convert(from: CType, to: CType): void {
     if (typeEquals(from, to)) return;
     const fs = slotOf(from), ts = slotOf(to);
-    if (fs === ts) return; // e.g. int<->uint, or pointer<->pointer: same wasm representation
+    if (fs === 'i32' && ts === 'i32') {
+      // Same WASM slot, but narrower C types keep their bit pattern in the low bits of the i32
+      // register between memory round-trips. A cast/assignment across differently-signed or
+      // differently-sized 8/16-bit types must re-mask/re-sign-extend here, since e.g. a `char`
+      // value already sign-extended to a negative i32 must become a small positive value when
+      // cast to `unsigned char` (and vice versa for widening a raw byte to signed `char`).
+      switch (to.kind) {
+        case 'uchar': case 'bool': this.fb.i32Const(0xff).op(Op.i32_and); break;
+        case 'char': case 'schar': this.fb.op(Op.i32_extend8_s); break;
+        case 'ushort': this.fb.i32Const(0xffff).op(Op.i32_and); break;
+        case 'short': this.fb.op(Op.i32_extend16_s); break;
+        default: break; // int/uint/pointer/enum: bit pattern is already correct
+      }
+      return;
+    }
+    if (fs === ts) return; // e.g. long<->ulong, or pointer<->pointer: same wasm representation
     if (fs === 'i32' && ts === 'i64') {
       this.fb.op(isUnsigned(from) ? Op.i64_extend_i32_u : Op.i64_extend_i32_s);
     } else if (fs === 'i64' && ts === 'i32') {
@@ -1263,8 +1301,6 @@ export class CodeGenerator {
     } else if (fs === 'f64' && ts === 'f32') {
       this.fb.op(Op.f32_demote_f64);
     }
-    // Narrowing within i32 (e.g. int -> char) needs no instruction: our load/store already
-    // truncates/extends at memory boundaries, and register-width i32 arithmetic is C-legal here.
   }
 
   private emitLoad(t: CType, offset: number): void {
