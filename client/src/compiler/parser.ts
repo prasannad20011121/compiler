@@ -1,6 +1,6 @@
 import type { Token } from './lexer';
 import type { CType } from './types';
-import { Types, pointerTo, arrayOf, functionType, makeStruct, is64BitInt, isFloatType } from './types';
+import { Types, pointerTo, referenceTo, arrayOf, functionType, makeStruct, is64BitInt, isFloatType } from './types';
 import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl, Pos } from './ast';
 
 export class ParseError extends Error {
@@ -495,6 +495,13 @@ export class Parser {
     while (this.eatPunct('*')) {
       while (QUALIFIER_KEYWORDS.has(this.cur().text) && this.cur().kind === 'ident') this.advance();
       type = pointerTo(type);
+    }
+    // C++ references (`int &r`, `int *&pr`) — one level only (no rvalue references: a literal
+    // `&&` token is its own punctuator, distinct from `&`, so it's simply not matched here).
+    if (this.cpp && this.isPunct('&')) {
+      this.advance();
+      while (QUALIFIER_KEYWORDS.has(this.cur().text) && this.cur().kind === 'ident') this.advance();
+      type = referenceTo(type);
     }
     if (this.eatPunct('(')) {
       // Could be a parenthesized declarator (grouping) OR a K&R-style function without params

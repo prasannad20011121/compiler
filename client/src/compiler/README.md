@@ -55,9 +55,11 @@ is fine for the short programs this IDE runs), and `printf`/`sprintf`/
 including calling one method from another without an explicit `this->`),
 constructors (including member-initializer lists, `Ctor(x) : field(x) {}`,
 which also correctly call a class-typed member's own constructor rather
-than just assigning it), destructors, `new`/`delete`, and both ways of
+than just assigning it), destructors, `new`/`delete`, both ways of
 constructing an object — as a declaration (`ClassName obj(args);`) and as
-an expression (`ClassName(args)`, e.g. `return Vector2D(x + o.x, y + o.y);`).
+an expression (`ClassName(args)`, e.g. `return Vector2D(x + o.x, y + o.y);`)
+— and references (`int &r = x;`, reference parameters and return values,
+including using a reference-returning call as an assignment target).
 
 ## Known gaps (by design, not oversight)
 
@@ -69,6 +71,7 @@ feature in its own right:
   unrelated code, but members/methods aren't inherited.
 - **No operator overloading** — so no `std::cout <<` / iostream. Use
   `printf`/`scanf` (fully supported) in C++ files too.
+- **No rvalue references** (`T&&`) — only ordinary lvalue references.
 - **No templates, exceptions, or namespaces** beyond parsing-and-ignoring.
 - **No function/method overloading** — one function per name; a second
   definition silently replaces the first at the WASM level.

@@ -35,6 +35,11 @@ export interface CType {
   underlying?: CType;
   // cv-qualifiers (informational only; not enforced)
   isConst?: boolean;
+  /** C++ references (`int&`): represented as a pointer CType with this flag set, so all the
+   * existing pointer machinery (size, alignment, calling convention) applies unchanged — codegen
+   * special-cases this flag purely to add the auto-deref-on-every-use behavior a plain pointer
+   * doesn't have. See codegen's isReferenceLocal/emitLvalueAddr's Ident case. */
+  isReference?: boolean;
 }
 
 export interface StructField {
@@ -75,6 +80,10 @@ export const Types = {
 
 export function pointerTo(pointee: CType): CType {
   return { kind: 'pointer', size: 4, align: 4, pointee };
+}
+
+export function referenceTo(pointee: CType): CType {
+  return { kind: 'pointer', size: 4, align: 4, pointee, isReference: true };
 }
 
 export function arrayOf(elem: CType, len: number | null): CType {

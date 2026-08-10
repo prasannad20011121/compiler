@@ -483,8 +483,13 @@ export class CodeGenerator {
       case 'Return': {
         if (s.expr) {
           const rt = this.currentFn.type.returns!;
-          const t = this.compileExpr(s.expr)!;
-          this.convert(t.type, rt);
+          if (rt.isReference) {
+            // Returning a reference means returning the referent's address, not its value.
+            this.emitLvalueAddr(s.expr);
+          } else {
+            const t = this.compileExpr(s.expr)!;
+            this.convert(t.type, rt);
+          }
         }
         this.fb.br(this.blockDepth - this.exitBlockDepth);
         return;
@@ -605,8 +610,7 @@ export class CodeGenerator {
         const target: Expr = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: fieldName, arrow: true, pos };
         this.emitLvalueAddr(target); // &this->field
         for (let i = 0; i < args.length; i++) {
-          const a = this.compileExpr(args[i])!;
-          this.convert(a.type, g.type.params![i + 1]);
+          this.compileArgFor(args[i], g.type.params![i + 1]);
         }
         this.fb.call(g.funcIndex!);
         continue;
@@ -634,6 +638,14 @@ export class CodeGenerator {
       return;
     }
     const off = this.allocLocal(d.name, d.type);
+    if (d.type.isReference) {
+      // Binding, not a value copy: store the referent's address, not its value.
+      if (!d.init) throw new CodegenError(`reference '${d.name}' must be initialized`, d.pos);
+      this.emitAddrOfSlot(off);
+      this.emitLvalueAddr(d.init);
+      this.emitStore(d.type, 0);
+      return;
+    }
     if (d.init) {
       this.emitInitializer(d.type, off, d.init);
       return;
@@ -645,8 +657,7 @@ export class CodeGenerator {
       const g = this.globals.get(ctorMethod.mangledName)!;
       this.emitAddrOfSlot(off);
       for (let i = 0; i < d.ctorArgs.length; i++) {
-        const a = this.compileExpr(d.ctorArgs[i])!;
-        this.convert(a.type, g.type.params![i + 1]);
+        this.compileArgFor(d.ctorArgs[i], g.type.params![i + 1]);
       }
       this.fb.call(g.funcIndex!);
       return;
@@ -779,8 +790,20 @@ export class CodeGenerator {
         if (t1) this.fb.op(Op.drop);
         return this.compileExpr(e.right);
       }
-      case 'Call':
-        return this.compileCall(e);
+      case 'Call': {
+        const result = this.compileCall(e);
+        // A call returning a reference produces its referent's address (like any other
+        // aggregate/reference-valued expression) — auto-deref to the actual value when read as
+        // an ordinary rvalue. When used as an lvalue instead, emitLvalueAddr's own Call case
+        // intercepts first and never reaches this auto-deref.
+        if (result && result.type.isReference) {
+          const pointee = result.type.pointee!;
+          this.emitLoad(pointee, 0);
+          e.type = pointee;
+          return { type: pointee };
+        }
+        return result;
+      }
       case 'Index': {
         const { type } = this.emitLvalueAddr(e);
         this.emitLoad(type, 0);
@@ -821,8 +844,7 @@ export class CodeGenerator {
           const g = this.globals.get(ctorMethod.mangledName)!;
           this.emitAddrOfSlot(off);
           for (let i = 0; i < e.args.length; i++) {
-            const a = this.compileExpr(e.args[i])!;
-            this.convert(a.type, g.type.params![i + 1]);
+            this.compileArgFor(e.args[i], g.type.params![i + 1]);
           }
           this.fb.call(g.funcIndex!);
         }
@@ -843,8 +865,7 @@ export class CodeGenerator {
           const g = this.globals.get(ctorMethod.mangledName)!;
           this.fb.localGet(ptrScratch);
           for (let i = 0; i < e.args.length; i++) {
-            const a = this.compileExpr(e.args[i])!;
-            this.convert(a.type, g.type.params![i + 1]);
+            this.compileArgFor(e.args[i], g.type.params![i + 1]);
           }
           this.fb.call(g.funcIndex!);
         }
@@ -889,6 +910,16 @@ export class CodeGenerator {
   private compileIdentLoad(e: Extract<Expr, { kind: 'Ident' }>): { type: CType } {
     const local = this.lookupLocal(e.name);
     if (local) {
+      if (local.type.isReference) {
+        // A reference variable transparently reads through to its referent: load the bound
+        // address (an ordinary pointer load), then load the value at that address.
+        const pointee = local.type.pointee!;
+        this.emitLocalAddr(local);
+        this.emitLoad(local.type, 0);
+        this.emitLoad(pointee, 0);
+        e.type = pointee;
+        return { type: pointee };
+      }
       this.emitLocalAddr(local);
       this.emitLoad(local.type, 0);
       e.type = local.type;
@@ -930,6 +961,17 @@ export class CodeGenerator {
     if (e.kind === 'Ident') {
       const local = this.lookupLocal(e.name);
       if (local) {
+        if (local.type.isReference) {
+          // The lvalue of a reference variable is its *referent's* address (so `r = v;` writes
+          // through to whatever `r` is bound to, and `&r` gives the referent's address too — the
+          // same "load the bound address" step, just without the extra value-load compileIdentLoad
+          // does afterward).
+          const pointee = local.type.pointee!;
+          this.emitLocalAddr(local);
+          this.emitLoad(local.type, 0);
+          e.type = pointee;
+          return { type: pointee };
+        }
         this.emitLocalAddr(local);
         e.type = local.type;
         return { type: local.type };
@@ -943,6 +985,18 @@ export class CodeGenerator {
       const implicitThis = this.implicitThisMember(e.name, e.pos);
       if (implicitThis) return this.emitLvalueAddr(implicitThis);
       throw new CodegenError(`use of undeclared identifier '${e.name}'`, e.pos);
+    }
+    if (e.kind === 'Call') {
+      // Only valid as an lvalue when the call returns a reference (e.g. `int &at(int i) {...}`,
+      // the classic operator[]-style pattern): the raw (un-auto-dereffed) call result is already
+      // the referent's address, per compileCall/the Return-statement's reference handling.
+      const result = this.compileCall(e);
+      if (!result || !result.type.isReference) {
+        throw new CodegenError('expression is not assignable', e.pos);
+      }
+      const pointee = result.type.pointee!;
+      e.type = pointee;
+      return { type: pointee };
     }
     if (e.kind === 'Unary' && e.op === '*') {
       const t = this.compileExpr(e.operand)!;
@@ -1004,7 +1058,7 @@ export class CodeGenerator {
     switch (e.kind) {
       case 'Ident': {
         const l = this.lookupLocal(e.name);
-        if (l) return l.type;
+        if (l) return l.type.isReference ? l.type.pointee! : l.type;
         const g = this.globals.get(e.name);
         if (g) return g.isFunc ? pointerTo(g.type) : g.type;
         const classType = this.currentClassType();
@@ -1037,21 +1091,24 @@ export class CodeGenerator {
       case 'StringLit':
         return pointerTo(Types.char);
       case 'Call': {
+        // A call returning a reference reads (in rvalue/inferType context) as its pointee type —
+        // same auto-deref-on-read rule as everywhere else references appear.
+        const unwrap = (t: CType): CType => (t.isReference ? t.pointee! : t);
         const callee = e.callee;
         if (callee.kind === 'Ident') {
           const builtinType = BUILTIN_RETURN_TYPES[callee.name];
           if (builtinType) return builtinType;
           const g = this.globals.get(callee.name);
-          if (g && g.isFunc) return g.type.returns!;
+          if (g && g.isFunc) return unwrap(g.type.returns!);
           const classType = this.currentClassType();
           const implicit = classType?.methods?.find((mm) => mm.name === callee.name);
-          if (implicit) return implicit.type.returns!;
+          if (implicit) return unwrap(implicit.type.returns!);
         }
         if (callee.kind === 'Member') {
           let baseType = this.inferType(callee.base);
           if (callee.arrow) baseType = this.derefType(baseType);
           const method = baseType.methods?.find((mm) => mm.name === callee.field);
-          if (method) return method.type.returns!;
+          if (method) return unwrap(method.type.returns!);
         }
         if (callee.kind === 'Ident' || callee.kind === 'Member') {
           throw new CodegenError('cannot infer the type of this call', e.pos);
@@ -1428,11 +1485,21 @@ export class CodeGenerator {
     return this.compileIndirectCall(e);
   }
 
+  /** Pushes one call argument, honoring a reference parameter (`void f(int &x)`): the caller
+   * passes the argument's address, implicitly — no `&` at the call site, matching real C++. */
+  private compileArgFor(argExpr: Expr, paramType: CType): void {
+    if (paramType.isReference) {
+      this.emitLvalueAddr(argExpr);
+      return;
+    }
+    const a = this.compileExpr(argExpr)!;
+    this.convert(a.type, paramType);
+  }
+
   private compileDirectCall(e: Extract<Expr, { kind: 'Call' }>, g: GlobalInfo): { type: CType } | null {
     const fixedCount = g.type.params!.length;
     for (let i = 0; i < fixedCount; i++) {
-      const a = this.compileExpr(e.args[i])!;
-      this.convert(a.type, g.type.params![i]);
+      this.compileArgFor(e.args[i], g.type.params![i]);
     }
     if (g.variadic) {
       const extra = e.args.slice(fixedCount);
@@ -1472,8 +1539,7 @@ export class CodeGenerator {
     const fnType = calleeType.pointee!;
     const fixedCount = fnType.params!.length;
     for (let i = 0; i < fixedCount; i++) {
-      const a = this.compileExpr(e.args[i])!;
-      this.convert(a.type, fnType.params![i]);
+      this.compileArgFor(e.args[i], fnType.params![i]);
     }
     this.compileExpr(e.callee); // pushes the function index last, as call_indirect requires
     const paramSlots = fnType.params!.map((p) => valType(slotOf(p)));
@@ -1500,8 +1566,7 @@ export class CodeGenerator {
     else this.emitLvalueAddr(m.base); // `.` on an lvalue: `this` is its address
 
     for (let i = 0; i < e.args.length; i++) {
-      const a = this.compileExpr(e.args[i])!;
-      this.convert(a.type, g.type.params![i + 1]);
+      this.compileArgFor(e.args[i], g.type.params![i + 1]);
     }
     this.fb.call(g.funcIndex!);
     e.type = g.type.returns!;
