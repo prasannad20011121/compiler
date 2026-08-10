@@ -1,6 +1,6 @@
 import type { Token } from './lexer';
 import type { CType } from './types';
-import { Types, pointerTo, arrayOf, functionType, makeStruct } from './types';
+import { Types, pointerTo, arrayOf, functionType, makeStruct, is64BitInt, isFloatType } from './types';
 import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl, Pos } from './ast';
 
 export class ParseError extends Error {
@@ -179,7 +179,7 @@ export class Parser {
       out.push({
         kind: 'VarDecl',
         name: cur.name,
-        type: cur.type,
+        type: this.resolveIncompleteArraySize(cur.type, init),
         init,
         isStatic: spec.isStatic,
         isExtern: spec.isExtern,
@@ -225,6 +225,17 @@ export class Parser {
   }
 
   // ---------- declaration specifiers ----------
+
+  /** `char buf[] = "literal";` / `int a[] = {1,2,3};`: the array type is incomplete (arrayLen
+   * null, size 0) until its initializer's length is known. Without this, such a declaration
+   * would allocate zero bytes of storage and the initializer would silently overrun into
+   * whatever memory follows. */
+  private resolveIncompleteArraySize(type: CType, init: Expr | null): CType {
+    if (type.kind !== 'array' || type.arrayLen !== null || !init) return type;
+    if (init.kind === 'StringLit') return arrayOf(type.pointee!, new TextEncoder().encode(init.value).length + 1);
+    if (init.kind === 'InitList') return arrayOf(type.pointee!, init.items.length);
+    return type;
+  }
 
   private parseDeclSpecifiers(): DeclSpec {
     let isTypedef = false, isStatic = false, isExtern = false;
@@ -613,7 +624,7 @@ export class Parser {
           let init: Expr | null = null;
           if (this.eatPunct('=')) init = this.parseInitializer();
           if (!d.name) throw new ParseError('expected declarator name', this.cur());
-          decls.push({ kind: 'VarDecl', name: d.name, type: d.type, init, isStatic: spec.isStatic, isExtern: spec.isExtern, pos });
+          decls.push({ kind: 'VarDecl', name: d.name, type: this.resolveIncompleteArraySize(d.type, init), init, isStatic: spec.isStatic, isExtern: spec.isExtern, pos });
         }
         if (!this.eatPunct(',')) break;
       }
@@ -858,6 +869,20 @@ export class Parser {
       const operand = this.parseUnary();
       return { kind: 'SizeofExpr', operand, pos };
     }
+    if (t.kind === 'ident' && t.text === 'va_arg') {
+      this.advance();
+      this.expectPunct('(');
+      const apExpr = this.parseAssignment();
+      this.expectPunct(',');
+      const targetType = this.parseTypeName();
+      this.expectPunct(')');
+      // va_arg needs to pick the right builtin reader for the argument's storage width/kind
+      // (see runtime/libc.ts's variadic calling convention); the resulting value keeps that
+      // builtin's canonical type (int/long/double) rather than the exact requested type, which
+      // is behaviorally equivalent for arithmetic/printing in the realistic cases this covers.
+      const variant = is64BitInt(targetType) ? 'i64' : isFloatType(targetType) ? 'f64' : 'i32';
+      return { kind: 'Call', callee: { kind: 'Ident', name: `__builtin_va_arg_${variant}`, pos }, args: [apExpr], pos };
+    }
     if (this.cpp) {
       if (t.kind === 'ident' && t.text === 'new') {
         this.advance();
@@ -940,7 +965,35 @@ export class Parser {
       if (this.cpp && t.text === 'true') { this.advance(); return { kind: 'BoolLit', value: true, pos }; }
       if (this.cpp && t.text === 'false') { this.advance(); return { kind: 'BoolLit', value: false, pos }; }
       if (this.cpp && t.text === 'nullptr') { this.advance(); return { kind: 'Nullptr', pos }; }
-      if (this.cpp && t.text === 'this') { this.advance(); return { kind: 'This', pos }; }
+      // `this` reuses the ordinary Ident machinery (it's already how codegen synthesizes implicit
+      // `this->field` accesses internally) rather than the otherwise-unhandled dedicated `This`
+      // AST node — see ast.ts's comment on that variant.
+      if (this.cpp && t.text === 'this') { this.advance(); return { kind: 'Ident', name: 'this', pos }; }
+      // Enum constants are resolved directly to literals here, at parse time: codegen has no
+      // notion of them (they were never registered as locals or globals), and this also makes
+      // them usable anywhere a compile-time constant is required (case labels, array sizes).
+      const enumValue = this.enumConsts.get(t.text);
+      if (enumValue !== undefined) {
+        this.advance();
+        return { kind: 'IntLit', value: enumValue, pos };
+      }
+      // `ClassName(args)` as an expression (a temporary object) — distinct from `ClassName obj(args);`
+      // as a declaration, which parseDeclStmt already handles. Only triggers for known class/struct
+      // type names so it never shadows an ordinary function call.
+      if (this.cpp && this.isPunct('(', 1)) {
+        const resolvedType = this.typedefTable.get(t.text);
+        if (resolvedType && (resolvedType.kind === 'struct' || resolvedType.kind === 'union')) {
+          this.advance(); // type name
+          this.advance(); // '('
+          const args: Expr[] = [];
+          if (!this.isPunct(')')) {
+            args.push(this.parseAssignment());
+            while (this.eatPunct(',')) args.push(this.parseAssignment());
+          }
+          this.expectPunct(')');
+          return { kind: 'TempObject', targetType: resolvedType, args, pos };
+        }
+      }
       this.advance();
       return { kind: 'Ident', name: t.text, pos };
     }

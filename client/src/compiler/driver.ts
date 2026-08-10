@@ -36,9 +36,21 @@ function makeResolver(files: SourceFile[]): FileResolver {
   };
   return {
     resolveQuoted: (spec, fromFile) => resolveAgainst(spec, fromFile),
-    resolveAngle: () => undefined, // system headers are no-ops: runtime symbols are always pre-declared
+    // Most system headers are no-ops: runtime functions (printf, malloc, ...) are resolved by
+    // name at codegen time regardless of whether a prototype was textually declared. stdarg.h is
+    // the exception — va_list is a *type name* the parser must recognize within the including
+    // translation unit itself (each file gets its own fresh Preprocessor/Parser, so our own
+    // runtime's internal va_list typedef never leaks into user code), so we provide it for real.
+    resolveAngle: (spec) => (BUILTIN_HEADERS[spec] ? { path: `<${spec}>`, text: BUILTIN_HEADERS[spec] } : undefined),
   };
 }
+
+const BUILTIN_HEADERS: Record<string, string> = {
+  'stdarg.h': `typedef char *va_list;
+#define va_start(ap, last) __builtin_va_start(ap)
+#define va_end(ap) __builtin_va_end(ap)
+`,
+};
 
 function normalizePath(p: string): string {
   const parts: string[] = [];

@@ -42,6 +42,8 @@ interface GlobalInfo {
 interface LocalInfo {
   type: CType;
   offset: number; // byte offset from the frame base (current __stack_ptr after prologue)
+  /** Set for `static` locals: a fixed data-segment address, used instead of the frame-relative offset. Persists across calls and is initialized once (not on every call). */
+  globalAddr?: number;
 }
 
 interface ScratchPool {
@@ -60,6 +62,7 @@ export class CodeGenerator {
   private stackTop = 0; // set once data layout is finalized
   private spGlobal!: number;
   private heapBaseGlobal!: number;
+  private staticLocalCounter = 0;
 
   // per-function state, reset in compileFunction
   private locals!: Map<string, LocalInfo>[];
@@ -312,6 +315,12 @@ export class CodeGenerator {
   private emitAddrOfSlot(offset: number): void {
     this.fb.globalGet(this.spGlobal);
     if (offset !== 0) this.fb.i32Const(offset).op(Op.i32_add);
+  }
+
+  /** Address of a local variable — a fixed data-segment address for `static` locals, otherwise the usual frame-relative stack slot. */
+  private emitLocalAddr(local: LocalInfo): void {
+    if (local.globalAddr !== undefined) this.fb.i32Const(local.globalAddr);
+    else this.emitAddrOfSlot(local.offset);
   }
 
   // ---------------- locals / scopes ----------------
@@ -614,6 +623,16 @@ export class CodeGenerator {
 
   private compileLocalVarDecl(d: VarDecl): void {
     if (d.isExtern) return; // reference to a global; no local slot
+    if (d.isStatic) {
+      // A `static` local gets real global storage — initialized once (baked directly into the
+      // data segment, like an ordinary global's constant initializer) rather than re-run on
+      // every call — and persists its value across calls, unlike an ordinary stack-frame local.
+      const uniqueName = `${this.currentFn.name}__static_${d.name}_${this.staticLocalCounter++}`;
+      const addr = this.reserveGlobal(uniqueName, d.type);
+      if (d.init) this.writeInitialBytes(addr, this.constExprToBytes(d.type, d.init));
+      this.locals[this.locals.length - 1].set(d.name, { type: d.type, offset: 0, globalAddr: addr });
+      return;
+    }
     const off = this.allocLocal(d.name, d.type);
     if (d.init) {
       this.emitInitializer(d.type, off, d.init);
@@ -792,6 +811,25 @@ export class CodeGenerator {
       }
       case 'InitList':
         throw new CodegenError('initializer list used outside of a declaration', e.pos);
+      case 'TempObject': {
+        const classType = e.targetType;
+        // A stack-resident temporary: allocate a hidden frame slot, construct into it, and
+        // evaluate to its address — exactly like every other aggregate-valued expression.
+        const off = this.allocLocal(`__temp${e.pos.line}_${Math.random()}`, classType);
+        const ctorMethod = classType.tag ? classType.methods?.find((mm) => mm.name === classType.tag) : undefined;
+        if (ctorMethod) {
+          const g = this.globals.get(ctorMethod.mangledName)!;
+          this.emitAddrOfSlot(off);
+          for (let i = 0; i < e.args.length; i++) {
+            const a = this.compileExpr(e.args[i])!;
+            this.convert(a.type, g.type.params![i + 1]);
+          }
+          this.fb.call(g.funcIndex!);
+        }
+        this.emitAddrOfSlot(off);
+        e.type = classType;
+        return { type: classType };
+      }
       case 'New': {
         const classType = e.targetType;
         const mallocG = this.globals.get('malloc');
@@ -851,7 +889,7 @@ export class CodeGenerator {
   private compileIdentLoad(e: Extract<Expr, { kind: 'Ident' }>): { type: CType } {
     const local = this.lookupLocal(e.name);
     if (local) {
-      this.emitAddrOfSlot(local.offset);
+      this.emitLocalAddr(local);
       this.emitLoad(local.type, 0);
       e.type = local.type;
       return { type: local.type };
@@ -892,7 +930,7 @@ export class CodeGenerator {
     if (e.kind === 'Ident') {
       const local = this.lookupLocal(e.name);
       if (local) {
-        this.emitAddrOfSlot(local.offset);
+        this.emitLocalAddr(local);
         e.type = local.type;
         return { type: local.type };
       }
@@ -1001,10 +1039,27 @@ export class CodeGenerator {
       case 'Call': {
         const callee = e.callee;
         if (callee.kind === 'Ident') {
+          const builtinType = BUILTIN_RETURN_TYPES[callee.name];
+          if (builtinType) return builtinType;
           const g = this.globals.get(callee.name);
           if (g && g.isFunc) return g.type.returns!;
+          const classType = this.currentClassType();
+          const implicit = classType?.methods?.find((mm) => mm.name === callee.name);
+          if (implicit) return implicit.type.returns!;
         }
-        return Types.int;
+        if (callee.kind === 'Member') {
+          let baseType = this.inferType(callee.base);
+          if (callee.arrow) baseType = this.derefType(baseType);
+          const method = baseType.methods?.find((mm) => mm.name === callee.field);
+          if (method) return method.type.returns!;
+        }
+        if (callee.kind === 'Ident' || callee.kind === 'Member') {
+          throw new CodegenError('cannot infer the type of this call', e.pos);
+        }
+        // Indirect call through a function-pointer-valued expression.
+        const calleeType = this.inferType(callee);
+        if (calleeType.kind === 'pointer' && calleeType.pointee!.kind === 'function') return calleeType.pointee!.returns!;
+        throw new CodegenError('called object is not a function or function pointer', e.pos);
       }
       case 'Binary':
         return this.binaryResultType(e.op, this.inferType(e.left), this.inferType(e.right));
@@ -1012,8 +1067,27 @@ export class CodeGenerator {
         return this.inferType(e.target);
       case 'Cond':
         return this.inferType(e.then);
-      default:
-        return Types.int;
+      case 'Comma':
+        return this.inferType(e.right);
+      case 'SizeofType':
+      case 'SizeofExpr':
+        return Types.uint;
+      case 'New':
+        return pointerTo(e.targetType);
+      case 'Delete':
+        return Types.void;
+      case 'BoolLit':
+        return Types.bool;
+      case 'Nullptr':
+        return pointerTo(Types.void);
+      case 'TempObject':
+        return e.targetType;
+      case 'InitList':
+        throw new CodegenError('initializer list has no standalone type', e.pos);
+      default: {
+        const exhaustive: never = e;
+        throw new CodegenError(`internal: inferType has no case for '${(exhaustive as Expr).kind}'`, (exhaustive as Expr).pos);
+      }
     }
   }
 
@@ -1333,19 +1407,28 @@ export class CodeGenerator {
       if (special !== undefined) return special;
     }
     if (e.callee.kind === 'Member') return this.compileMethodCall(e, e.callee);
-    if (e.callee.kind !== 'Ident') throw new CodegenError('only direct function calls are supported', e.pos);
-    const calleeName = e.callee.name;
-    if (!this.globals.has(calleeName)) {
-      // Inside a method, an unqualified call to another method of the same class means `this->name(...)`.
-      const classType = this.currentClassType();
-      if (classType?.methods?.some((mm) => mm.name === calleeName)) {
-        const pos = e.pos;
-        const implicitCallee: Extract<Expr, { kind: 'Member' }> = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: calleeName, arrow: true, pos };
-        return this.compileMethodCall(e, implicitCallee);
+    // A named function called directly (not through a local variable holding a function pointer)
+    // resolves to a known global by name; everything else — a local/field holding a function
+    // pointer, an array/struct element, the result of another expression — is an indirect call
+    // through whatever value the callee expression produces (see compileIndirectCall).
+    if (e.callee.kind === 'Ident' && !this.lookupLocal(e.callee.name)) {
+      const calleeName = e.callee.name;
+      if (!this.globals.has(calleeName)) {
+        // Inside a method, an unqualified call to another method of the same class means `this->name(...)`.
+        const classType = this.currentClassType();
+        if (classType?.methods?.some((mm) => mm.name === calleeName)) {
+          const pos = e.pos;
+          const implicitCallee: Extract<Expr, { kind: 'Member' }> = { kind: 'Member', base: { kind: 'Ident', name: 'this', pos }, field: calleeName, arrow: true, pos };
+          return this.compileMethodCall(e, implicitCallee);
+        }
       }
+      const g = this.globals.get(calleeName);
+      if (g && g.isFunc) return this.compileDirectCall(e, g);
     }
-    const g = this.globals.get(calleeName);
-    if (!g || !g.isFunc) throw new CodegenError(`call to undeclared function '${calleeName}'`, e.pos);
+    return this.compileIndirectCall(e);
+  }
+
+  private compileDirectCall(e: Extract<Expr, { kind: 'Call' }>, g: GlobalInfo): { type: CType } | null {
     const fixedCount = g.type.params!.length;
     for (let i = 0; i < fixedCount; i++) {
       const a = this.compileExpr(e.args[i])!;
@@ -1369,6 +1452,36 @@ export class CodeGenerator {
     e.type = g.type.returns!;
     this.fb.call(g.funcIndex!);
     return g.type.returns!.kind === 'void' ? null : { type: g.type.returns! };
+  }
+
+  /**
+   * Calls through a function-pointer *value* (a local/field holding one, an array/struct element,
+   * ...) via WASM's `call_indirect`. Every function — imported or locally defined — lives at a
+   * fixed index in a single funcref table populated 1:1 with function indices (see
+   * ModuleBuilder.finish's element section), which is exactly what makes this work: a "function
+   * pointer" in our model already *is* its function index (see compileIdentLoad's function
+   * branch), so that index doubles as a valid table index with no extra bookkeeping.
+   * No variadic support here — indirect calls to variadic functions are a rare combination and a
+   * documented gap.
+   */
+  private compileIndirectCall(e: Extract<Expr, { kind: 'Call' }>): { type: CType } | null {
+    const calleeType = this.inferType(e.callee);
+    if (calleeType.kind !== 'pointer' || calleeType.pointee!.kind !== 'function') {
+      throw new CodegenError('called object is not a function or function pointer', e.pos);
+    }
+    const fnType = calleeType.pointee!;
+    const fixedCount = fnType.params!.length;
+    for (let i = 0; i < fixedCount; i++) {
+      const a = this.compileExpr(e.args[i])!;
+      this.convert(a.type, fnType.params![i]);
+    }
+    this.compileExpr(e.callee); // pushes the function index last, as call_indirect requires
+    const paramSlots = fnType.params!.map((p) => valType(slotOf(p)));
+    const resultSlots = fnType.returns!.kind === 'void' ? [] : [valType(slotOf(fnType.returns!))];
+    const typeIdx = this.mod.typeOf(paramSlots, resultSlots);
+    this.fb.callIndirect(typeIdx);
+    e.type = fnType.returns!;
+    return fnType.returns!.kind === 'void' ? null : { type: fnType.returns! };
   }
 
   /** `obj.method(args)` / `ptr->method(args)`: resolved to an ordinary call to the mangled global function, with `this` passed as an implicit first argument. No overloading, so lookup is by name only. */
@@ -1532,6 +1645,16 @@ export class CodeGenerator {
     }
   }
 }
+
+/** Return types of the value-producing codegen intrinsics (see tryCompileBuiltinCall), for inferType — these never appear in this.globals since they're intercepted before an ordinary global lookup. */
+const BUILTIN_RETURN_TYPES: Record<string, CType> = {
+  __builtin_va_arg_i32: Types.int,
+  __builtin_va_arg_i64: Types.long,
+  __builtin_va_arg_f64: Types.double,
+  __builtin_heap_base: Types.uint,
+  __builtin_memory_grow: Types.int,
+  __builtin_memory_size: Types.int,
+};
 
 function isAggregateAssignTarget(t: CType): boolean {
   return t.kind === 'struct' || t.kind === 'union' || t.kind === 'array';

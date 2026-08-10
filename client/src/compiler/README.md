@@ -35,20 +35,29 @@ for expression-evaluation scratch registers.
 ## What's supported
 
 **C**: the practical bulk of C17 — all control flow (`if`/`while`/`do`/
-`for`/`switch` with fallthrough), full operator precedence and the usual
-arithmetic conversions, structs/unions/enums/typedefs, pointers and
-pointer arithmetic, arrays (incl. multi-dimensional), function pointers,
-variadic functions (`printf`-style, via a real `va_list` calling
-convention), and a self-hosted libc subset (`runtime/libc.ts`): `string.h`,
-a bump allocator (`malloc`/`free`/`calloc`/`realloc` — `free` does not
-reclaim memory, which is fine for the short programs this IDE runs), and
-`printf`/`sprintf`/`scanf` with width/precision/padding flags.
+`for`/`switch` with fallthrough, correctly running a `for` loop's step on
+`continue`), full operator precedence and the usual arithmetic
+conversions, structs/unions/enums (enum constants work as ordinary
+compile-time-constant expressions, not just in their own declaration)/
+typedefs, pointers and pointer arithmetic, arrays (incl. multi-dimensional
+and `char buf[] = "literal"`-style inferred sizes), `static` locals (real
+persistent storage, initialized once — not re-run per call), function
+pointers including *indirect calls* through one (a real WASM table +
+`call_indirect`, not just storing the value), user-defined variadic
+functions (`#include <stdarg.h>` — `va_list`/`va_start`/`va_arg`/`va_end`
+all work, alongside the `printf`-style calling convention they share), and
+a self-hosted libc subset (`runtime/libc.ts`): `string.h`, a bump allocator
+(`malloc`/`free`/`calloc`/`realloc` — `free` does not reclaim memory, which
+is fine for the short programs this IDE runs), and `printf`/`sprintf`/
+`scanf` with width/precision/padding flags and correct decimal rounding.
 
 **C++**: classes/structs with fields and methods (implicit `this`,
 including calling one method from another without an explicit `this->`),
-constructors (including member-initializer lists, `Ctor(x) : field(x) {}`)
-and destructors, `new`/`delete`, and direct-initialization
-(`ClassName obj(args);`).
+constructors (including member-initializer lists, `Ctor(x) : field(x) {}`,
+which also correctly call a class-typed member's own constructor rather
+than just assigning it), destructors, `new`/`delete`, and both ways of
+constructing an object — as a declaration (`ClassName obj(args);`) and as
+an expression (`ClassName(args)`, e.g. `return Vector2D(x + o.x, y + o.y);`).
 
 ## Known gaps (by design, not oversight)
 
@@ -79,4 +88,11 @@ feature in its own right:
 `tests/*-smoke.ts` compile real programs and execute the resulting WASM in
 Node to check actual output, not just that parsing succeeds. Run any of
 them with `tests/run.sh tests/<name>.ts` (bundles via esbuild, the same
-way the app itself is built, then runs with plain `node`).
+way the app itself is built, then runs with plain `node`). Beyond the
+unit-style suites (lexer/parser/preprocessor/wasm/codegen/driver),
+`tests/battery-smoke.ts`, `tests/battery2-c-smoke.ts`, and
+`tests/battery2-cpp-smoke.ts` are batteries of 90+ complete real programs
+(single- and multi-file, simple through fairly advanced — sorting
+algorithms, BSTs, backtracking, multi-file modules with shared headers,
+classes composing classes) — this is what's actually caught most of the
+real bugs during development, well beyond what hand-picked unit tests find.

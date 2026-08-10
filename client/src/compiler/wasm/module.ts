@@ -81,6 +81,13 @@ export class FuncBuilder {
     return this.op(Op.call).uleb(funcIndex);
   }
 
+  /** Expects [args..., funcIndex] already on the stack (funcIndex on top). */
+  callIndirect(typeIndex: number): this {
+    this.op(Op.call_indirect).uleb(typeIndex);
+    this.code.uleb(0); // table index (reserved byte)
+    return this;
+  }
+
   /** memarg: alignment hint (log2) then offset. We always use natural alignment. */
   mem(op: number, align: number, offset: number): this {
     this.op(op);
@@ -282,6 +289,21 @@ export class ModuleBuilder {
       this.section(out, SectionId.function, s);
     }
 
+    // Section 4: Table — a single funcref table sized to hold every function (imports + local),
+    // populated below (section 9) as an identity mapping (table[i] = function index i). This is
+    // what makes calling through a function-pointer *value* work: since a "function pointer" in
+    // our model already just *is* its function index (see codegen's function-to-pointer decay),
+    // `call_indirect` on that index looks it up in this table and finds exactly that function.
+    const totalFuncs = this.imports.length + this.funcTypeIndices.length;
+    {
+      const s = new ByteWriter();
+      s.uleb(1); // one table
+      s.u8(ValType.funcref);
+      s.u8(0x00); // flags: min only
+      s.uleb(totalFuncs);
+      this.section(out, SectionId.table, s);
+    }
+
     // Section 5: Memory
     {
       const s = new ByteWriter();
@@ -315,6 +337,19 @@ export class ModuleBuilder {
         s.uleb(e.index);
       }
       this.section(out, SectionId.export, s);
+    }
+
+    // Section 9: Element — fills the table declared above with every function index, in order.
+    {
+      const s = new ByteWriter();
+      s.uleb(1); // one segment
+      s.uleb(0); // flags: active segment, table index 0, expr offset follows
+      s.u8(Op.i32_const);
+      s.sleb(0);
+      s.u8(Op.end);
+      s.uleb(totalFuncs);
+      for (let i = 0; i < totalFuncs; i++) s.uleb(i);
+      this.section(out, SectionId.element, s);
     }
 
     // Section 10: Code

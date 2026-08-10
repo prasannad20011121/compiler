@@ -28,9 +28,12 @@ export type Expr =
   // C++ additions (used once the C++ layer is enabled)
   | { kind: 'New'; targetType: CType; args: Expr[]; type?: CType; pos: Pos }
   | { kind: 'Delete'; operand: Expr; isArray: boolean; type?: CType; pos: Pos }
-  | { kind: 'This'; type?: CType; pos: Pos }
   | { kind: 'BoolLit'; value: boolean; type?: CType; pos: Pos }
-  | { kind: 'Nullptr'; type?: CType; pos: Pos };
+  | { kind: 'Nullptr'; type?: CType; pos: Pos }
+  /** `ClassName(args)` used as an expression (not a declaration) — a temporary object, e.g. in
+   * `return Vector2D(x + o.x, y + o.y);`. Constructed into a hidden local slot; evaluates to that
+   * slot's address, same as every other aggregate-valued expression in this compiler. */
+  | { kind: 'TempObject'; targetType: CType; args: Expr[]; type?: CType; pos: Pos };
 
 // ---------- Statements ----------
 

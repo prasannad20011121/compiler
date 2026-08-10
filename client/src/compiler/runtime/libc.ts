@@ -297,6 +297,13 @@ int vfprintf_fd(int fd, const char *fmt, va_list ap) {
       double v = __builtin_va_arg_f64(ap);
       if (v < 0) { isNeg = 1; v = -v; }
       int p = prec < 0 ? 6 : prec;
+      /* Round to p decimal places (round-half-up) by adding half a unit in the last place
+         *before* splitting into integer/fractional parts, so a carry (e.g. 9.996 at p=2)
+         correctly propagates into the integer part instead of just truncating. */
+      double half = 0.5;
+      int hk = 0;
+      while (hk < p) { half = half / 10.0; hk = hk + 1; }
+      v = v + half;
       long ip = (long)v;
       double frac = v - (double)ip;
       int fl = 0;
