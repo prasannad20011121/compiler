@@ -1,0 +1,875 @@
+import type { Token } from './lexer.ts';
+import type { CType } from './types.ts';
+import { Types, pointerTo, arrayOf, functionType, makeStruct } from './types.ts';
+import type { Expr, Stmt, VarDecl, FunctionDecl, TopDecl, Pos } from './ast.ts';
+
+export class ParseError extends Error {
+  constructor(message: string, tok: Token) {
+    super(`${tok.file}:${tok.line}:${tok.col}: ${message} (near '${tok.text || '<eof>'}')`);
+  }
+}
+
+const TYPE_KEYWORDS = new Set([
+  'void', 'char', 'short', 'int', 'long', 'float', 'double', 'signed', 'unsigned', '_Bool', 'bool',
+]);
+const QUALIFIER_KEYWORDS = new Set(['const', 'volatile', 'restrict', 'inline', '_Noreturn']);
+const STORAGE_KEYWORDS = new Set(['typedef', 'static', 'extern', 'register', 'auto']);
+
+interface DeclSpec {
+  type: CType;
+  isTypedef: boolean;
+  isStatic: boolean;
+  isExtern: boolean;
+}
+
+export class Parser {
+  private toks: Token[];
+  private pos = 0;
+  private typedefScopes: Set<string>[] = [new Set()];
+  private tags = new Map<string, CType>();
+  private enumConsts = new Map<string, bigint>();
+  cpp: boolean;
+
+  constructor(tokens: Token[], cpp = false) {
+    this.toks = tokens;
+    this.cpp = cpp;
+    if (cpp) this.typedefScopes[0].add('bool');
+  }
+
+  // ---------- token helpers ----------
+
+  private peek(o = 0): Token {
+    return this.toks[Math.min(this.pos + o, this.toks.length - 1)];
+  }
+  private cur(): Token {
+    return this.peek();
+  }
+  private advance(): Token {
+    const t = this.toks[this.pos];
+    if (this.pos < this.toks.length - 1) this.pos++;
+    return t;
+  }
+  private atEof(): boolean {
+    return this.cur().kind === 'eof';
+  }
+  private isPunct(text: string, o = 0): boolean {
+    const t = this.peek(o);
+    return t.kind === 'punct' && t.text === text;
+  }
+  private isKw(text: string, o = 0): boolean {
+    const t = this.peek(o);
+    return t.kind === 'ident' && t.text === text;
+  }
+  private eatPunct(text: string): boolean {
+    if (this.isPunct(text)) {
+      this.advance();
+      return true;
+    }
+    return false;
+  }
+  private eatKw(text: string): boolean {
+    if (this.isKw(text)) {
+      this.advance();
+      return true;
+    }
+    return false;
+  }
+  private expectPunct(text: string): Token {
+    if (!this.isPunct(text)) throw new ParseError(`expected '${text}'`, this.cur());
+    return this.advance();
+  }
+  private expectIdent(): string {
+    const t = this.cur();
+    if (t.kind !== 'ident') throw new ParseError('expected identifier', t);
+    this.advance();
+    return t.text;
+  }
+  private pos_(): Pos {
+    const t = this.cur();
+    return { file: t.file, line: t.line };
+  }
+
+  private isTypeName(name: string): boolean {
+    for (let i = this.typedefScopes.length - 1; i >= 0; i--) {
+      if (this.typedefScopes[i].has(name)) return true;
+    }
+    return false;
+  }
+
+  private pushScope(): void {
+    this.typedefScopes.push(new Set());
+  }
+  private popScope(): void {
+    this.typedefScopes.pop();
+  }
+
+  private startsDeclSpec(o = 0): boolean {
+    const t = this.peek(o);
+    if (t.kind !== 'ident') return false;
+    if (TYPE_KEYWORDS.has(t.text) || QUALIFIER_KEYWORDS.has(t.text) || STORAGE_KEYWORDS.has(t.text)) return true;
+    if (t.text === 'struct' || t.text === 'union' || t.text === 'enum') return true;
+    if (this.cpp && t.text === 'class') return true;
+    return this.isTypeName(t.text);
+  }
+
+  // ---------- translation unit ----------
+
+  parseTranslationUnit(): TopDecl[] {
+    const decls: TopDecl[] = [];
+    while (!this.atEof()) {
+      const d = this.parseExternalDeclaration();
+      decls.push(...d);
+    }
+    return decls;
+  }
+
+  private parseExternalDeclaration(): TopDecl[] {
+    const spec = this.parseDeclSpecifiers();
+
+    // `struct Foo { ... };` with no declarator at all.
+    if (this.isPunct(';')) {
+      this.advance();
+      return [];
+    }
+
+    const first = this.parseDeclarator(spec.type);
+    if (spec.isTypedef) {
+      if (first.name) {
+        this.typedefScopes[this.typedefScopes.length - 1].add(first.name);
+        this.registerTypedef(first.name, first.type);
+      }
+      this.finishSimpleDeclList(spec, first);
+      return [];
+    }
+
+    if (first.type.kind === 'function' && this.isPunct('{')) {
+      const fn = this.parseFunctionBody(spec, first.name!, first.type);
+      return [fn];
+    }
+
+    // One or more comma-separated declarators, each with optional initializer.
+    const out: TopDecl[] = [];
+    let cur: { name: string | null; type: CType } | null = first;
+    while (cur) {
+      let init: Expr | null = null;
+      if (this.eatPunct('=')) init = this.parseInitializer();
+      if (!cur.name) throw new ParseError('declarator requires a name', this.cur());
+      out.push({
+        kind: 'VarDecl',
+        name: cur.name,
+        type: cur.type,
+        init,
+        isStatic: spec.isStatic,
+        isExtern: spec.isExtern,
+        pos: this.pos_(),
+      });
+      if (this.eatPunct(',')) {
+        cur = this.parseDeclarator(spec.type);
+      } else {
+        cur = null;
+      }
+    }
+    this.expectPunct(';');
+    return out;
+  }
+
+  private finishSimpleDeclList(spec: DeclSpec, first: { name: string | null; type: CType }): void {
+    let cur: { name: string | null; type: CType } | null = first;
+    while (cur) {
+      if (this.eatPunct(',')) {
+        cur = this.parseDeclarator(spec.type);
+        if (cur.name) {
+          this.typedefScopes[this.typedefScopes.length - 1].add(cur.name);
+          this.registerTypedef(cur.name, cur.type);
+        }
+      } else {
+        cur = null;
+      }
+    }
+    this.expectPunct(';');
+  }
+
+  private parseFunctionBody(spec: DeclSpec, name: string, type: CType): FunctionDecl {
+    const body = this.parseCompound();
+    return {
+      kind: 'FunctionDecl',
+      name,
+      type,
+      paramNames: type.paramNames ?? [],
+      body,
+      isStatic: spec.isStatic,
+      pos: this.pos_(),
+    };
+  }
+
+  // ---------- declaration specifiers ----------
+
+  private parseDeclSpecifiers(): DeclSpec {
+    let isTypedef = false, isStatic = false, isExtern = false;
+    let voidC = 0, charC = 0, shortC = 0, intC = 0, longC = 0, floatC = 0, doubleC = 0, boolC = 0;
+    let signedC = 0, unsignedC = 0;
+    let resolved: CType | null = null;
+
+    for (;;) {
+      const t = this.cur();
+      if (t.kind !== 'ident') break;
+      if (t.text === 'typedef') { isTypedef = true; this.advance(); continue; }
+      if (t.text === 'static') { isStatic = true; this.advance(); continue; }
+      if (t.text === 'extern') { isExtern = true; this.advance(); continue; }
+      if (STORAGE_KEYWORDS.has(t.text)) { this.advance(); continue; }
+      if (QUALIFIER_KEYWORDS.has(t.text)) { this.advance(); continue; }
+
+      if (t.text === 'struct' || t.text === 'union') {
+        resolved = this.parseStructOrUnionSpecifier(t.text === 'union');
+        continue;
+      }
+      if (t.text === 'enum') {
+        resolved = this.parseEnumSpecifier();
+        continue;
+      }
+      if (t.text === 'void') { voidC++; this.advance(); continue; }
+      if (t.text === 'char') { charC++; this.advance(); continue; }
+      if (t.text === 'short') { shortC++; this.advance(); continue; }
+      if (t.text === 'int') { intC++; this.advance(); continue; }
+      if (t.text === 'long') { longC++; this.advance(); continue; }
+      if (t.text === 'float') { floatC++; this.advance(); continue; }
+      if (t.text === 'double') { doubleC++; this.advance(); continue; }
+      if (t.text === 'signed') { signedC++; this.advance(); continue; }
+      if (t.text === 'unsigned') { unsignedC++; this.advance(); continue; }
+      if (t.text === '_Bool' || (this.cpp && t.text === 'bool')) { boolC++; this.advance(); continue; }
+
+      if (resolved === null && voidC + charC + shortC + intC + longC + floatC + doubleC + boolC + signedC + unsignedC === 0 && this.isTypeName(t.text)) {
+        resolved = this.lookupTypedef(t.text);
+        this.advance();
+        continue;
+      }
+      break;
+    }
+
+    if (resolved) return { type: resolved, isTypedef, isStatic, isExtern };
+
+    let type: CType;
+    if (boolC) type = Types.bool;
+    else if (floatC) type = Types.float;
+    else if (doubleC) type = Types.double;
+    else if (charC) type = unsignedC ? Types.uchar : signedC ? Types.schar : Types.char;
+    else if (shortC) type = unsignedC ? Types.ushort : Types.short;
+    else if (longC) type = unsignedC ? Types.ulong : Types.long;
+    else if (voidC) type = Types.void;
+    else if (intC || signedC || unsignedC) type = unsignedC ? Types.uint : Types.int;
+    else throw new ParseError('expected a type specifier', this.cur());
+
+    return { type, isTypedef, isStatic, isExtern };
+  }
+
+  private typedefTable = new Map<string, CType>();
+  private lookupTypedef(name: string): CType {
+    const t = this.typedefTable.get(name);
+    if (!t) throw new ParseError(`unknown type name '${name}'`, this.cur());
+    return t;
+  }
+  registerTypedef(name: string, type: CType): void {
+    this.typedefTable.set(name, type);
+  }
+
+  private parseStructOrUnionSpecifier(isUnion: boolean): CType {
+    this.advance(); // struct/union
+    let tag: string | null = null;
+    if (this.cur().kind === 'ident' && !this.isPunct('{')) {
+      tag = this.cur().text;
+      this.advance();
+    }
+    // Look up (or create) a single placeholder object per tag, up front. Self-referential
+    // members (`struct Node* next;` inside `struct Node { ... }`) capture this same object by
+    // reference; when the definition completes below we mutate it in place with Object.assign
+    // so every earlier reference (including pointer fields already parsed) sees the real layout.
+    const key = tag ? `${isUnion ? 'union' : 'struct'} ${tag}` : null;
+    let placeholder: CType;
+    if (key && this.tags.has(key)) {
+      placeholder = this.tags.get(key)!;
+    } else {
+      placeholder = { kind: isUnion ? 'union' : 'struct', size: 0, align: 1, tag: tag ?? undefined, fields: [] };
+      if (key) this.tags.set(key, placeholder);
+    }
+    if (this.eatPunct('{')) {
+      const fields: { name: string; type: CType }[] = [];
+      while (!this.isPunct('}')) {
+        const spec = this.parseDeclSpecifiers();
+        if (this.eatPunct(';')) continue; // anonymous member (e.g. unnamed nested struct) — skip
+        for (;;) {
+          const d = this.parseDeclarator(spec.type);
+          if (this.eatPunct(':')) {
+            this.parseConditional(); // bit-field width: parsed and discarded (bit-fields unsupported)
+          }
+          if (!d.name) throw new ParseError('expected member name', this.cur());
+          fields.push({ name: d.name, type: d.type });
+          if (!this.eatPunct(',')) break;
+        }
+        this.expectPunct(';');
+      }
+      this.expectPunct('}');
+      const completed = makeStruct(tag ?? `<anon@${this.pos}>`, fields, isUnion);
+      Object.assign(placeholder, completed);
+      return placeholder;
+    }
+    if (!tag) throw new ParseError('expected struct/union tag or body', this.cur());
+    return placeholder;
+  }
+
+  private parseEnumSpecifier(): CType {
+    this.advance(); // enum
+    let tag: string | null = null;
+    if (this.cur().kind === 'ident' && !this.isPunct('{')) {
+      tag = this.cur().text;
+      this.advance();
+    }
+    const enumType: CType = { kind: 'enum', size: 4, align: 4, tag: tag ?? undefined, underlying: Types.int };
+    if (this.eatPunct('{')) {
+      let next = 0n;
+      while (!this.isPunct('}')) {
+        const name = this.expectIdent();
+        if (this.eatPunct('=')) next = this.evalConstInt(this.parseConditional());
+        this.enumConsts.set(name, next);
+        next += 1n;
+        if (!this.eatPunct(',')) break;
+      }
+      this.expectPunct('}');
+      if (tag) this.tags.set(`enum ${tag}`, enumType);
+    } else if (tag) {
+      const existing = this.tags.get(`enum ${tag}`);
+      if (existing) return existing;
+      this.tags.set(`enum ${tag}`, enumType);
+    }
+    return enumType;
+  }
+
+  getEnumConstants(): Map<string, bigint> {
+    return this.enumConsts;
+  }
+
+  // ---------- declarators (chibicc-style placeholder backpatching) ----------
+
+  private parseDeclarator(base: CType): { name: string | null; type: CType } {
+    let type = base;
+    while (this.eatPunct('*')) {
+      while (QUALIFIER_KEYWORDS.has(this.cur().text) && this.cur().kind === 'ident') this.advance();
+      type = pointerTo(type);
+    }
+    if (this.eatPunct('(')) {
+      // Could be a parenthesized declarator (grouping) OR a K&R-style function without params
+      // immediately at top level. We only ever call this from contexts where the former applies.
+      const placeholder = {} as CType;
+      const inner = this.parseDeclarator(placeholder);
+      this.expectPunct(')');
+      const outer = this.parseTypeSuffix(type);
+      Object.assign(placeholder, outer);
+      return inner;
+    }
+    let name: string | null = null;
+    if (this.cur().kind === 'ident' && !TYPE_KEYWORDS.has(this.cur().text)) {
+      name = this.advance().text;
+    }
+    type = this.parseTypeSuffix(type);
+    return { name, type };
+  }
+
+  private parseTypeSuffix(base: CType): CType {
+    if (this.eatPunct('[')) {
+      let len: number | null = null;
+      if (!this.isPunct(']')) {
+        len = Number(this.evalConstInt(this.parseConditional()));
+      }
+      this.expectPunct(']');
+      const inner = this.parseTypeSuffix(base);
+      return arrayOf(inner, len);
+    }
+    if (this.eatPunct('(')) {
+      const { params, names, variadic } = this.parseParamList();
+      this.expectPunct(')');
+      return functionType(params, base, variadic, names);
+    }
+    return base;
+  }
+
+  private parseParamList(): { params: CType[]; names: string[]; variadic: boolean } {
+    const params: CType[] = [];
+    const names: string[] = [];
+    let variadic = false;
+    if (this.isPunct(')')) return { params, names, variadic };
+    if (this.isKw('void') && this.peek(1).kind === 'punct' && this.peek(1).text === ')') {
+      this.advance();
+      return { params, names, variadic };
+    }
+    for (;;) {
+      if (this.eatPunct('...')) {
+        variadic = true;
+        break;
+      }
+      const spec = this.parseDeclSpecifiers();
+      const d = this.parseDeclarator(spec.type);
+      // array/function parameters decay to pointer/function-pointer per C rules.
+      let pt = d.type;
+      if (pt.kind === 'array') pt = pointerTo(pt.pointee!);
+      else if (pt.kind === 'function') pt = pointerTo(pt);
+      params.push(pt);
+      names.push(d.name ?? `__p${params.length}`);
+      if (!this.eatPunct(',')) break;
+    }
+    return { params, names, variadic };
+  }
+
+  /** Parses a standalone type-name (for casts / sizeof): decl-specifiers + optional abstract declarator. */
+  parseTypeName(): CType {
+    const spec = this.parseDeclSpecifiers();
+    if (this.isPunct(')') || this.isPunct(',')) return spec.type;
+    const d = this.parseDeclarator(spec.type);
+    return d.type;
+  }
+
+  // ---------- statements ----------
+
+  parseCompound(): Stmt {
+    const pos = this.pos_();
+    this.expectPunct('{');
+    this.pushScope();
+    const body: Stmt[] = [];
+    while (!this.isPunct('}') && !this.atEof()) {
+      body.push(this.parseBlockItem());
+    }
+    this.expectPunct('}');
+    this.popScope();
+    return { kind: 'Compound', body, pos };
+  }
+
+  private parseBlockItem(): Stmt {
+    if (this.startsDeclSpec()) {
+      return this.parseDeclStmt();
+    }
+    return this.parseStatement();
+  }
+
+  private parseDeclStmt(): Stmt {
+    const pos = this.pos_();
+    const spec = this.parseDeclSpecifiers();
+    const decls: VarDecl[] = [];
+    if (!this.isPunct(';')) {
+      for (;;) {
+        const d = this.parseDeclarator(spec.type);
+        if (spec.isTypedef) {
+          if (d.name) {
+            this.typedefScopes[this.typedefScopes.length - 1].add(d.name);
+            this.registerTypedef(d.name, d.type);
+          }
+        } else {
+          let init: Expr | null = null;
+          if (this.eatPunct('=')) init = this.parseInitializer();
+          if (!d.name) throw new ParseError('expected declarator name', this.cur());
+          decls.push({ kind: 'VarDecl', name: d.name, type: d.type, init, isStatic: spec.isStatic, isExtern: spec.isExtern, pos });
+        }
+        if (!this.eatPunct(',')) break;
+      }
+    }
+    this.expectPunct(';');
+    return { kind: 'DeclStmt', decls, pos };
+  }
+
+  private parseStatement(): Stmt {
+    const pos = this.pos_();
+    const t = this.cur();
+
+    if (this.isPunct('{')) return this.parseCompound();
+    if (this.eatPunct(';')) return { kind: 'Empty', pos };
+
+    if (t.kind === 'ident') {
+      switch (t.text) {
+        case 'if': {
+          this.advance();
+          this.expectPunct('(');
+          const cond = this.parseExpr();
+          this.expectPunct(')');
+          const then = this.parseStatement();
+          let els: Stmt | null = null;
+          if (this.eatKw('else')) els = this.parseStatement();
+          return { kind: 'If', cond, then, else: els, pos };
+        }
+        case 'while': {
+          this.advance();
+          this.expectPunct('(');
+          const cond = this.parseExpr();
+          this.expectPunct(')');
+          const body = this.parseStatement();
+          return { kind: 'While', cond, body, pos };
+        }
+        case 'do': {
+          this.advance();
+          const body = this.parseStatement();
+          if (!this.eatKw('while')) throw new ParseError("expected 'while'", this.cur());
+          this.expectPunct('(');
+          const cond = this.parseExpr();
+          this.expectPunct(')');
+          this.expectPunct(';');
+          return { kind: 'DoWhile', cond, body, pos };
+        }
+        case 'for': {
+          this.advance();
+          this.expectPunct('(');
+          this.pushScope();
+          let init: Stmt | null = null;
+          if (!this.isPunct(';')) {
+            init = this.startsDeclSpec() ? this.parseDeclStmt() : { kind: 'ExprStmt', expr: this.parseExpr(), pos: this.pos_() };
+            if (init.kind === 'ExprStmt') this.expectPunct(';');
+          } else {
+            this.advance();
+          }
+          const cond = this.isPunct(';') ? null : this.parseExpr();
+          this.expectPunct(';');
+          const step = this.isPunct(')') ? null : this.parseExpr();
+          this.expectPunct(')');
+          const body = this.parseStatement();
+          this.popScope();
+          return { kind: 'For', init, cond, step, body, pos };
+        }
+        case 'return': {
+          this.advance();
+          const expr = this.isPunct(';') ? null : this.parseExpr();
+          this.expectPunct(';');
+          return { kind: 'Return', expr, pos };
+        }
+        case 'break':
+          this.advance(); this.expectPunct(';');
+          return { kind: 'Break', pos };
+        case 'continue':
+          this.advance(); this.expectPunct(';');
+          return { kind: 'Continue', pos };
+        case 'switch': {
+          this.advance();
+          this.expectPunct('(');
+          const expr = this.parseExpr();
+          this.expectPunct(')');
+          const body = this.parseStatement();
+          return { kind: 'Switch', expr, body, pos };
+        }
+        case 'case': {
+          this.advance();
+          const expr = this.parseConditional();
+          this.expectPunct(':');
+          return { kind: 'Case', expr, pos };
+        }
+        case 'default':
+          this.advance(); this.expectPunct(':');
+          return { kind: 'Default', pos };
+        case 'goto': {
+          this.advance();
+          const name = this.expectIdent();
+          this.expectPunct(';');
+          return { kind: 'Goto', name, pos };
+        }
+        default:
+          break;
+      }
+      if (t.kind === 'ident' && this.peek(1).kind === 'punct' && this.peek(1).text === ':' && !this.startsDeclSpec()) {
+        const name = this.advance().text;
+        this.advance(); // ':'
+        return { kind: 'Label', name, pos };
+      }
+    }
+
+    const expr = this.parseExpr();
+    this.expectPunct(';');
+    return { kind: 'ExprStmt', expr, pos };
+  }
+
+  // ---------- initializers ----------
+
+  parseInitializer(): Expr {
+    const pos = this.pos_();
+    if (this.eatPunct('{')) {
+      const items: Expr[] = [];
+      while (!this.isPunct('}')) {
+        items.push(this.parseInitializer());
+        if (!this.eatPunct(',')) break;
+      }
+      this.expectPunct('}');
+      return { kind: 'InitList', items, pos };
+    }
+    return this.parseAssignment();
+  }
+
+  // ---------- expressions ----------
+
+  parseExpr(): Expr {
+    let e = this.parseAssignment();
+    while (this.isPunct(',')) {
+      const pos = this.pos_();
+      this.advance();
+      const right = this.parseAssignment();
+      e = { kind: 'Comma', left: e, right, pos };
+    }
+    return e;
+  }
+
+  private ASSIGN_OPS = new Set(['=', '+=', '-=', '*=', '/=', '%=', '<<=', '>>=', '&=', '|=', '^=']);
+
+  private parseAssignment(): Expr {
+    const left = this.parseConditional();
+    const t = this.cur();
+    if (t.kind === 'punct' && this.ASSIGN_OPS.has(t.text)) {
+      const pos = this.pos_();
+      this.advance();
+      const value = this.parseAssignment();
+      return { kind: 'Assign', op: t.text, target: left, value, pos };
+    }
+    return left;
+  }
+
+  private parseConditional(): Expr {
+    const cond = this.parseLogicalOr();
+    if (this.eatPunct('?')) {
+      const pos = this.pos_();
+      const then = this.parseExpr();
+      this.expectPunct(':');
+      const els = this.parseConditional();
+      return { kind: 'Cond', cond, then, else: els, pos };
+    }
+    return cond;
+  }
+
+  private binaryLevel(ops: string[], next: () => Expr): Expr {
+    let e = next();
+    for (;;) {
+      const t = this.cur();
+      if (t.kind !== 'punct' || !ops.includes(t.text)) break;
+      const pos = this.pos_();
+      this.advance();
+      const right = next();
+      e = { kind: 'Binary', op: t.text, left: e, right, pos };
+    }
+    return e;
+  }
+
+  private parseLogicalOr(): Expr { return this.binaryLevel(['||'], () => this.parseLogicalAnd()); }
+  private parseLogicalAnd(): Expr { return this.binaryLevel(['&&'], () => this.parseBitOr()); }
+  private parseBitOr(): Expr { return this.binaryLevel(['|'], () => this.parseBitXor()); }
+  private parseBitXor(): Expr { return this.binaryLevel(['^'], () => this.parseBitAnd()); }
+  private parseBitAnd(): Expr { return this.binaryLevel(['&'], () => this.parseEquality()); }
+  private parseEquality(): Expr { return this.binaryLevel(['==', '!='], () => this.parseRelational()); }
+  private parseRelational(): Expr { return this.binaryLevel(['<', '>', '<=', '>='], () => this.parseShift()); }
+  private parseShift(): Expr { return this.binaryLevel(['<<', '>>'], () => this.parseAdditive()); }
+  private parseAdditive(): Expr { return this.binaryLevel(['+', '-'], () => this.parseMultiplicative()); }
+  private parseMultiplicative(): Expr { return this.binaryLevel(['*', '/', '%'], () => this.parseCast()); }
+
+  private looksLikeTypeStart(o = 0): boolean {
+    const t = this.peek(o);
+    if (t.kind !== 'ident') return false;
+    return TYPE_KEYWORDS.has(t.text) || QUALIFIER_KEYWORDS.has(t.text) || t.text === 'struct' || t.text === 'union' || t.text === 'enum' || this.isTypeName(t.text);
+  }
+
+  private parseCast(): Expr {
+    if (this.isPunct('(') && this.looksLikeTypeStart(1)) {
+      const save = this.pos;
+      const pos = this.pos_();
+      this.advance();
+      const targetType = this.parseTypeName();
+      if (this.isPunct(')')) {
+        this.advance();
+        if (this.isPunct('{')) {
+          // Compound literal `(Type){...}` — treat as an initializer list of that type.
+          const initList = this.parseInitializer();
+          return { ...initList, type: targetType } as Expr;
+        }
+        const operand = this.parseCast();
+        return { kind: 'Cast', targetType, operand, pos };
+      }
+      this.pos = save; // not actually a cast; back off and parse as a parenthesized expression
+    }
+    return this.parseUnary();
+  }
+
+  private parseUnary(): Expr {
+    const pos = this.pos_();
+    const t = this.cur();
+    if (t.kind === 'punct' && ['+', '-', '!', '~', '*', '&'].includes(t.text)) {
+      this.advance();
+      const operand = this.parseCast();
+      return { kind: 'Unary', op: t.text, operand, prefix: true, pos };
+    }
+    if (t.kind === 'punct' && (t.text === '++' || t.text === '--')) {
+      this.advance();
+      const operand = this.parseUnary();
+      return { kind: 'Unary', op: t.text, operand, prefix: true, pos };
+    }
+    if (t.kind === 'ident' && t.text === 'sizeof') {
+      this.advance();
+      if (this.isPunct('(') && this.looksLikeTypeStart(1)) {
+        this.advance();
+        const targetType = this.parseTypeName();
+        this.expectPunct(')');
+        return { kind: 'SizeofType', targetType, pos };
+      }
+      const operand = this.parseUnary();
+      return { kind: 'SizeofExpr', operand, pos };
+    }
+    if (this.cpp) {
+      if (t.kind === 'ident' && t.text === 'new') {
+        this.advance();
+        const targetType = this.parseTypeName();
+        const args: Expr[] = [];
+        if (this.eatPunct('(')) {
+          if (!this.isPunct(')')) {
+            args.push(this.parseAssignment());
+            while (this.eatPunct(',')) args.push(this.parseAssignment());
+          }
+          this.expectPunct(')');
+        }
+        return { kind: 'New', targetType, args, pos };
+      }
+      if (t.kind === 'ident' && t.text === 'delete') {
+        this.advance();
+        const isArray = this.isPunct('[') && this.isPunct(']', 1);
+        if (isArray) { this.advance(); this.advance(); }
+        const operand = this.parseUnary();
+        return { kind: 'Delete', operand, isArray, pos };
+      }
+    }
+    return this.parsePostfix();
+  }
+
+  private parsePostfix(): Expr {
+    let e = this.parsePrimary();
+    for (;;) {
+      const pos = this.pos_();
+      if (this.eatPunct('[')) {
+        const index = this.parseExpr();
+        this.expectPunct(']');
+        e = { kind: 'Index', base: e, index, pos };
+      } else if (this.eatPunct('(')) {
+        const args: Expr[] = [];
+        if (!this.isPunct(')')) {
+          args.push(this.parseAssignment());
+          while (this.eatPunct(',')) args.push(this.parseAssignment());
+        }
+        this.expectPunct(')');
+        e = { kind: 'Call', callee: e, args, pos };
+      } else if (this.eatPunct('.')) {
+        const field = this.expectIdent();
+        e = { kind: 'Member', base: e, field, arrow: false, pos };
+      } else if (this.eatPunct('->')) {
+        const field = this.expectIdent();
+        e = { kind: 'Member', base: e, field, arrow: true, pos };
+      } else if (this.isPunct('++') || this.isPunct('--')) {
+        const op = this.advance().text;
+        e = { kind: 'Unary', op, operand: e, prefix: false, pos };
+      } else {
+        break;
+      }
+    }
+    return e;
+  }
+
+  private parsePrimary(): Expr {
+    const pos = this.pos_();
+    const t = this.cur();
+    if (t.kind === 'num') {
+      this.advance();
+      return this.parseNumberLiteral(t.text, pos);
+    }
+    if (t.kind === 'string') {
+      let value = t.value;
+      this.advance();
+      while (this.cur().kind === 'string') value += this.advance().value;
+      return { kind: 'StringLit', value, pos };
+    }
+    if (t.kind === 'char') {
+      this.advance();
+      return { kind: 'CharLit', value: t.value.charCodeAt(0) || 0, pos };
+    }
+    if (t.kind === 'ident') {
+      if (this.cpp && t.text === 'true') { this.advance(); return { kind: 'BoolLit', value: true, pos }; }
+      if (this.cpp && t.text === 'false') { this.advance(); return { kind: 'BoolLit', value: false, pos }; }
+      if (this.cpp && t.text === 'nullptr') { this.advance(); return { kind: 'Nullptr', pos }; }
+      if (this.cpp && t.text === 'this') { this.advance(); return { kind: 'This', pos }; }
+      this.advance();
+      return { kind: 'Ident', name: t.text, pos };
+    }
+    if (this.eatPunct('(')) {
+      const e = this.parseExpr();
+      this.expectPunct(')');
+      return e;
+    }
+    throw new ParseError('expected expression', t);
+  }
+
+  private parseNumberLiteral(text: string, pos: Pos): Expr {
+    const m = /^(.*?)([uUlLfF]*)$/.exec(text)!;
+    let digits = m[1];
+    const suffix = m[2].toLowerCase();
+    const isFloatLiteral = digits.includes('.') || (/e/i.test(digits) && !digits.startsWith('0x')) || suffix.includes('f');
+    if (isFloatLiteral) {
+      return { kind: 'FloatLit', value: parseFloat(digits), isFloat: suffix.includes('f'), pos };
+    }
+    const value = digits.startsWith('0x') || digits.startsWith('0X')
+      ? BigInt(digits)
+      : digits.startsWith('0') && digits.length > 1
+        ? BigInt(parseInt(digits, 8))
+        : BigInt(digits);
+    return { kind: 'IntLit', value, pos };
+  }
+
+  // ---------- constant expression evaluation (array sizes, enum values) ----------
+
+  evalConstInt(e: Expr): bigint {
+    switch (e.kind) {
+      case 'IntLit': return e.value;
+      case 'CharLit': return BigInt(e.value);
+      case 'Ident': {
+        const v = this.enumConsts.get(e.name);
+        if (v !== undefined) return v;
+        throw new ParseError(`'${e.name}' is not a constant expression`, this.cur());
+      }
+      case 'Unary': {
+        const v = this.evalConstInt(e.operand);
+        switch (e.op) {
+          case '-': return -v;
+          case '+': return v;
+          case '!': return v === 0n ? 1n : 0n;
+          case '~': return ~v;
+          default: throw new ParseError(`operator '${e.op}' not allowed in constant expression`, this.cur());
+        }
+      }
+      case 'Binary': {
+        const a = this.evalConstInt(e.left);
+        const b = this.evalConstInt(e.right);
+        switch (e.op) {
+          case '+': return a + b;
+          case '-': return a - b;
+          case '*': return a * b;
+          case '/': return a / b;
+          case '%': return a % b;
+          case '&': return a & b;
+          case '|': return a | b;
+          case '^': return a ^ b;
+          case '<<': return a << b;
+          case '>>': return a >> b;
+          case '==': return a === b ? 1n : 0n;
+          case '!=': return a !== b ? 1n : 0n;
+          case '<': return a < b ? 1n : 0n;
+          case '>': return a > b ? 1n : 0n;
+          case '<=': return a <= b ? 1n : 0n;
+          case '>=': return a >= b ? 1n : 0n;
+          case '&&': return a !== 0n && b !== 0n ? 1n : 0n;
+          case '||': return a !== 0n || b !== 0n ? 1n : 0n;
+          default: throw new ParseError(`operator '${e.op}' not allowed in constant expression`, this.cur());
+        }
+      }
+      case 'Cond': {
+        const c = this.evalConstInt(e.cond);
+        return c !== 0n ? this.evalConstInt(e.then) : this.evalConstInt(e.else);
+      }
+      case 'SizeofType':
+        return BigInt(e.targetType.size);
+      default:
+        throw new ParseError('not a constant expression', this.cur());
+    }
+  }
+
+}
